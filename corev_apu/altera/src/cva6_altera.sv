@@ -835,7 +835,8 @@ cva6_peripherals #(
 //    .spi_miso       ( spi_miso                    ),
 //    .spi_ss         ( spi_ss                      ),
 	 .leds_o         ( {led[3:1], unused_led[7:5]}),
-    .dip_switches_i ( '0     )
+    .dip_switches_i ( '0     ),
+    .ie_irq_i       ( 1'b0  )
 );
 
 

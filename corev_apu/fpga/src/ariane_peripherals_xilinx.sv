@@ -69,7 +69,9 @@ module ariane_peripherals #(
     // SD Card
     input  logic       sd_clk_i        ,
     output logic [7:0] leds_o          ,
-    input  logic [7:0] dip_switches_i
+    input  logic [7:0] dip_switches_i  ,
+    // Inference Engine IRQ
+    input  logic       ie_irq_i
 );
 
     // ---------------
@@ -78,7 +80,8 @@ module ariane_peripherals #(
     logic [ariane_soc::NumSources-1:0] irq_sources;
 
     // Unused interrupt sources
-    assign irq_sources[ariane_soc::NumSources-1:7] = '0;
+    assign irq_sources[ariane_soc::NumSources-1:8] = '0;
+    assign irq_sources[7] = ie_irq_i;
 
     REG_BUS #(
         .ADDR_WIDTH ( 32 ),

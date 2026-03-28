@@ -354,7 +354,8 @@ assign addr_map = '{
   '{ idx: ariane_soc::SPI,      start_addr: ariane_soc::SPIBase,      end_addr: ariane_soc::SPIBase + ariane_soc::SPILength           },
   '{ idx: ariane_soc::Ethernet, start_addr: ariane_soc::EthernetBase, end_addr: ariane_soc::EthernetBase + ariane_soc::EthernetLength },
   '{ idx: ariane_soc::GPIO,     start_addr: ariane_soc::GPIOBase,     end_addr: ariane_soc::GPIOBase + ariane_soc::GPIOLength         },
-  '{ idx: ariane_soc::DRAM,     start_addr: ariane_soc::DRAMBase,     end_addr: ariane_soc::DRAMBase + ariane_soc::DRAMLength         }
+  '{ idx: ariane_soc::DRAM,     start_addr: ariane_soc::DRAMBase,     end_addr: ariane_soc::DRAMBase + ariane_soc::DRAMLength         },
+  '{ idx: ariane_soc::InferenceEngine, start_addr: ariane_soc::InferenceEngineBase, end_addr: ariane_soc::InferenceEngineBase + ariane_soc::InferenceEngineLength }
 };
 
 localparam axi_pkg::xbar_cfg_t AXI_XBAR_CFG = '{
@@ -1141,11 +1142,148 @@ ariane_peripherals #(
     .spi_ss         ( spi_ss                      ),
     `ifdef KC705
       .leds_o         ( {led[3:0], unused_led[7:4]}),
-      .dip_switches_i ( {sw, unused_switches}     )
+      .dip_switches_i ( {sw, unused_switches}     ),
     `else
       .leds_o         ( led                       ),
-      .dip_switches_i ( sw                        )
+      .dip_switches_i ( sw                        ),
     `endif
+    .ie_irq_i       ( ie_irq_done                 )
+);
+
+// ---------------
+// Inference Engine (AXI-Lite peripheral with fault isolation)
+// ---------------
+
+logic ie_irq_done;
+
+AXI_LITE #(
+    .AXI_ADDR_WIDTH ( AxiAddrWidth ),
+    .AXI_DATA_WIDTH ( AxiDataWidth )
+) ie_axi_lite();
+
+axi_to_axi_lite_intf #(
+    .AXI_ADDR_WIDTH     ( AxiAddrWidth     ),
+    .AXI_DATA_WIDTH     ( AxiDataWidth     ),
+    .AXI_ID_WIDTH       ( AxiIdWidthSlaves ),
+    .AXI_USER_WIDTH     ( AxiUserWidth     ),
+    .AXI_MAX_WRITE_TXNS ( 1               ),
+    .AXI_MAX_READ_TXNS  ( 1               ),
+    .FALL_THROUGH       ( 1'b0            )
+) i_axi_to_axi_lite_ie (
+    .clk_i      ( clk                                    ),
+    .rst_ni     ( ndmreset_n                             ),
+    .testmode_i ( test_en                                ),
+    .slv        ( master[ariane_soc::InferenceEngine]    ),
+    .mst        ( ie_axi_lite                            )
+);
+
+// Timeout wrapper: prevents inference engine from deadlocking the crossbar
+logic [AxiAddrWidth-1:0] ie_to_awaddr, ie_to_araddr;
+logic        ie_to_awvalid, ie_to_awready;
+logic [AxiDataWidth-1:0] ie_to_wdata;
+logic [AxiDataWidth/8-1:0] ie_to_wstrb;
+logic        ie_to_wvalid,  ie_to_wready;
+logic [1:0]  ie_to_bresp;
+logic        ie_to_bvalid,  ie_to_bready;
+logic        ie_to_arvalid, ie_to_arready;
+logic [AxiDataWidth-1:0] ie_to_rdata;
+logic [1:0]  ie_to_rresp;
+logic        ie_to_rvalid,  ie_to_rready;
+
+axi_lite_timeout #(
+    .ADDR_WIDTH     ( AxiAddrWidth ),
+    .DATA_WIDTH     ( AxiDataWidth ),
+    .TIMEOUT_CYCLES ( 4096         )
+) i_axi_lite_timeout_ie (
+    .clk      ( clk        ),
+    .rst_n    ( ndmreset_n ),
+    // Upstream (from AXI-Lite bridge)
+    .s_awaddr  ( ie_axi_lite.aw_addr  ),
+    .s_awvalid ( ie_axi_lite.aw_valid ),
+    .s_awready ( ie_axi_lite.aw_ready ),
+    .s_wdata   ( ie_axi_lite.w_data   ),
+    .s_wstrb   ( ie_axi_lite.w_strb   ),
+    .s_wvalid  ( ie_axi_lite.w_valid  ),
+    .s_wready  ( ie_axi_lite.w_ready  ),
+    .s_bresp   ( ie_axi_lite.b_resp   ),
+    .s_bvalid  ( ie_axi_lite.b_valid  ),
+    .s_bready  ( ie_axi_lite.b_ready  ),
+    .s_araddr  ( ie_axi_lite.ar_addr  ),
+    .s_arvalid ( ie_axi_lite.ar_valid ),
+    .s_arready ( ie_axi_lite.ar_ready ),
+    .s_rdata   ( ie_axi_lite.r_data   ),
+    .s_rresp   ( ie_axi_lite.r_resp   ),
+    .s_rvalid  ( ie_axi_lite.r_valid  ),
+    .s_rready  ( ie_axi_lite.r_ready  ),
+    // Downstream (to inference engine wrapper)
+    .m_awaddr  ( ie_to_awaddr  ),
+    .m_awvalid ( ie_to_awvalid ),
+    .m_awready ( ie_to_awready ),
+    .m_wdata   ( ie_to_wdata   ),
+    .m_wstrb   ( ie_to_wstrb   ),
+    .m_wvalid  ( ie_to_wvalid  ),
+    .m_wready  ( ie_to_wready  ),
+    .m_bresp   ( ie_to_bresp   ),
+    .m_bvalid  ( ie_to_bvalid  ),
+    .m_bready  ( ie_to_bready  ),
+    .m_araddr  ( ie_to_araddr  ),
+    .m_arvalid ( ie_to_arvalid ),
+    .m_arready ( ie_to_arready ),
+    .m_rdata   ( ie_to_rdata   ),
+    .m_rresp   ( ie_to_rresp   ),
+    .m_rvalid  ( ie_to_rvalid  ),
+    .m_rready  ( ie_to_rready  )
+);
+
+// DMA master port — tied off in Phase 1, active in Phase 2
+logic [63:0] ie_dma_araddr;
+logic [7:0]  ie_dma_arlen;
+logic [2:0]  ie_dma_arsize;
+logic [1:0]  ie_dma_arburst;
+logic        ie_dma_arvalid, ie_dma_arready;
+logic [63:0] ie_dma_rdata;
+logic [1:0]  ie_dma_rresp;
+logic        ie_dma_rlast, ie_dma_rvalid, ie_dma_rready;
+
+inference_engine_wrapper #(
+    .AXI_ADDR_WIDTH ( 12   ),
+    .AXI_DATA_WIDTH ( 64   ),
+    .HAS_DMA        ( 1'b1 )
+) i_inference_engine (
+    .clk   ( clk        ),
+    .rst_n ( ndmreset_n ),
+    // AXI-Lite slave (from timeout wrapper, truncate address to 12 bits)
+    .s_axi_awaddr  ( ie_to_awaddr[11:0] ),
+    .s_axi_awvalid ( ie_to_awvalid      ),
+    .s_axi_awready ( ie_to_awready      ),
+    .s_axi_wdata   ( ie_to_wdata        ),
+    .s_axi_wstrb   ( ie_to_wstrb        ),
+    .s_axi_wvalid  ( ie_to_wvalid       ),
+    .s_axi_wready  ( ie_to_wready       ),
+    .s_axi_bresp   ( ie_to_bresp        ),
+    .s_axi_bvalid  ( ie_to_bvalid       ),
+    .s_axi_bready  ( ie_to_bready       ),
+    .s_axi_araddr  ( ie_to_araddr[11:0] ),
+    .s_axi_arvalid ( ie_to_arvalid      ),
+    .s_axi_arready ( ie_to_arready      ),
+    .s_axi_rdata   ( ie_to_rdata        ),
+    .s_axi_rresp   ( ie_to_rresp        ),
+    .s_axi_rvalid  ( ie_to_rvalid       ),
+    .s_axi_rready  ( ie_to_rready       ),
+    // DMA master (Phase 2)
+    .m_axi_araddr  ( ie_dma_araddr  ),
+    .m_axi_arlen   ( ie_dma_arlen   ),
+    .m_axi_arsize  ( ie_dma_arsize  ),
+    .m_axi_arburst ( ie_dma_arburst ),
+    .m_axi_arvalid ( ie_dma_arvalid ),
+    .m_axi_arready ( ie_dma_arready ),
+    .m_axi_rdata   ( ie_dma_rdata   ),
+    .m_axi_rresp   ( ie_dma_rresp   ),
+    .m_axi_rlast   ( ie_dma_rlast   ),
+    .m_axi_rvalid  ( ie_dma_rvalid  ),
+    .m_axi_rready  ( ie_dma_rready  ),
+    // Interrupt
+    .irq_done ( ie_irq_done )
 );
 
 
@@ -1340,24 +1478,226 @@ xlnx_axi_clock_converter i_xlnx_axi_clock_converter_ddr (
   .m_axi_bresp    ( s_axi_bresp      ),
   .m_axi_bvalid   ( s_axi_bvalid     ),
   .m_axi_bready   ( s_axi_bready     ),
-  .m_axi_arid     ( s_axi_arid       ),
-  .m_axi_araddr   ( s_axi_araddr     ),
-  .m_axi_arlen    ( s_axi_arlen      ),
-  .m_axi_arsize   ( s_axi_arsize     ),
-  .m_axi_arburst  ( s_axi_arburst    ),
-  .m_axi_arlock   ( s_axi_arlock     ),
-  .m_axi_arcache  ( s_axi_arcache    ),
-  .m_axi_arprot   ( s_axi_arprot     ),
-  .m_axi_arregion ( s_axi_arregion   ),
-  .m_axi_arqos    ( s_axi_arqos      ),
-  .m_axi_arvalid  ( s_axi_arvalid    ),
-  .m_axi_arready  ( s_axi_arready    ),
-  .m_axi_rid      ( s_axi_rid        ),
-  .m_axi_rdata    ( s_axi_rdata      ),
-  .m_axi_rresp    ( s_axi_rresp      ),
-  .m_axi_rlast    ( s_axi_rlast      ),
-  .m_axi_rvalid   ( s_axi_rvalid     ),
-  .m_axi_rready   ( s_axi_rready     )
+  .m_axi_arid     ( cpu_dram_arid     ),
+  .m_axi_araddr   ( cpu_dram_araddr   ),
+  .m_axi_arlen    ( cpu_dram_arlen    ),
+  .m_axi_arsize   ( cpu_dram_arsize   ),
+  .m_axi_arburst  ( cpu_dram_arburst  ),
+  .m_axi_arlock   ( cpu_dram_arlock   ),
+  .m_axi_arcache  ( cpu_dram_arcache  ),
+  .m_axi_arprot   ( cpu_dram_arprot   ),
+  .m_axi_arregion ( cpu_dram_arregion ),
+  .m_axi_arqos    ( cpu_dram_arqos    ),
+  .m_axi_arvalid  ( cpu_dram_arvalid  ),
+  .m_axi_arready  ( cpu_dram_arready  ),
+  .m_axi_rid      ( cpu_dram_rid      ),
+  .m_axi_rdata    ( cpu_dram_rdata    ),
+  .m_axi_rresp    ( cpu_dram_rresp    ),
+  .m_axi_rlast    ( cpu_dram_rlast    ),
+  .m_axi_rvalid   ( cpu_dram_rvalid   ),
+  .m_axi_rready   ( cpu_dram_rready   )
+);
+
+// ---------------
+// IE DMA: clock domain crossing (50 MHz → MIG ui_clk) + read arbiter
+// ---------------
+// CPU DRAM read-path intermediates (MIG clock domain, from CPU clock converter)
+logic [AxiIdWidthSlaves-1:0] cpu_dram_arid;
+logic [AxiAddrWidth-1:0]     cpu_dram_araddr;
+logic [7:0]                  cpu_dram_arlen;
+logic [2:0]                  cpu_dram_arsize;
+logic [1:0]                  cpu_dram_arburst;
+logic [0:0]                  cpu_dram_arlock;
+logic [3:0]                  cpu_dram_arcache;
+logic [2:0]                  cpu_dram_arprot;
+logic [3:0]                  cpu_dram_arregion;
+logic [3:0]                  cpu_dram_arqos;
+logic                        cpu_dram_arvalid;
+logic                        cpu_dram_arready;
+logic [AxiIdWidthSlaves-1:0] cpu_dram_rid;
+logic [AxiDataWidth-1:0]     cpu_dram_rdata;
+logic [1:0]                  cpu_dram_rresp;
+logic                        cpu_dram_rlast;
+logic                        cpu_dram_rvalid;
+logic                        cpu_dram_rready;
+
+// IE DMA read-path intermediates (MIG clock domain, from IE clock converter)
+logic [AxiIdWidthSlaves-1:0] ie_mig_arid;
+logic [AxiAddrWidth-1:0]     ie_mig_araddr;
+logic [7:0]                  ie_mig_arlen;
+logic [2:0]                  ie_mig_arsize;
+logic [1:0]                  ie_mig_arburst;
+logic [0:0]                  ie_mig_arlock;
+logic [3:0]                  ie_mig_arcache;
+logic [2:0]                  ie_mig_arprot;
+logic [3:0]                  ie_mig_arqos;
+logic                        ie_mig_arvalid;
+logic                        ie_mig_arready;
+logic [AxiIdWidthSlaves-1:0] ie_mig_rid;
+logic [AxiDataWidth-1:0]     ie_mig_rdata;
+logic [1:0]                  ie_mig_rresp;
+logic                        ie_mig_rlast;
+logic                        ie_mig_rvalid;
+logic                        ie_mig_rready;
+
+// Clock converter: IE DMA (50 MHz) → MIG ui_clk (read-only)
+xlnx_axi_clock_converter i_xlnx_axi_clock_converter_ie (
+  .s_axi_aclk     ( clk              ),
+  .s_axi_aresetn  ( ndmreset_n       ),
+  // AW (tied off — read-only)
+  .s_axi_awid     ( '0               ),
+  .s_axi_awaddr   ( '0               ),
+  .s_axi_awlen    ( '0               ),
+  .s_axi_awsize   ( '0               ),
+  .s_axi_awburst  ( '0               ),
+  .s_axi_awlock   ( '0               ),
+  .s_axi_awcache  ( '0               ),
+  .s_axi_awprot   ( '0               ),
+  .s_axi_awregion ( '0               ),
+  .s_axi_awqos    ( '0               ),
+  .s_axi_awvalid  ( 1'b0             ),
+  .s_axi_awready  (                  ),
+  // W (tied off)
+  .s_axi_wdata    ( '0               ),
+  .s_axi_wstrb    ( '0               ),
+  .s_axi_wlast    ( 1'b0             ),
+  .s_axi_wvalid   ( 1'b0             ),
+  .s_axi_wready   (                  ),
+  // B (tied off)
+  .s_axi_bid      (                  ),
+  .s_axi_bresp    (                  ),
+  .s_axi_bvalid   (                  ),
+  .s_axi_bready   ( 1'b1             ),
+  // AR (from IE DMA, 50 MHz domain)
+  .s_axi_arid     ( {AxiIdWidthSlaves{1'b0}} ),
+  .s_axi_araddr   ( ie_dma_araddr    ),
+  .s_axi_arlen    ( ie_dma_arlen     ),
+  .s_axi_arsize   ( ie_dma_arsize    ),
+  .s_axi_arburst  ( ie_dma_arburst   ),
+  .s_axi_arlock   ( 1'b0             ),
+  .s_axi_arcache  ( 4'b0011          ),
+  .s_axi_arprot   ( 3'b000           ),
+  .s_axi_arregion ( 4'b0000          ),
+  .s_axi_arqos    ( 4'b0000          ),
+  .s_axi_arvalid  ( ie_dma_arvalid   ),
+  .s_axi_arready  ( ie_dma_arready   ),
+  // R (to IE DMA, 50 MHz domain)
+  .s_axi_rid      (                  ),
+  .s_axi_rdata    ( ie_dma_rdata     ),
+  .s_axi_rresp    ( ie_dma_rresp     ),
+  .s_axi_rlast    ( ie_dma_rlast     ),
+  .s_axi_rvalid   ( ie_dma_rvalid    ),
+  .s_axi_rready   ( ie_dma_rready    ),
+  // Master side → ie_mig_* intermediates (ui_clk domain)
+  .m_axi_aclk     ( ddr_clock_out    ),
+  .m_axi_aresetn  ( ndmreset_n       ),
+  .m_axi_awid     (                  ),
+  .m_axi_awaddr   (                  ),
+  .m_axi_awlen    (                  ),
+  .m_axi_awsize   (                  ),
+  .m_axi_awburst  (                  ),
+  .m_axi_awlock   (                  ),
+  .m_axi_awcache  (                  ),
+  .m_axi_awprot   (                  ),
+  .m_axi_awregion (                  ),
+  .m_axi_awqos    (                  ),
+  .m_axi_awvalid  (                  ),
+  .m_axi_awready  ( 1'b0             ),
+  .m_axi_wdata    (                  ),
+  .m_axi_wstrb    (                  ),
+  .m_axi_wlast    (                  ),
+  .m_axi_wvalid   (                  ),
+  .m_axi_wready   ( 1'b0             ),
+  .m_axi_bid      ( '0               ),
+  .m_axi_bresp    ( '0               ),
+  .m_axi_bvalid   ( 1'b0             ),
+  .m_axi_bready   (                  ),
+  .m_axi_arid     ( ie_mig_arid      ),
+  .m_axi_araddr   ( ie_mig_araddr    ),
+  .m_axi_arlen    ( ie_mig_arlen     ),
+  .m_axi_arsize   ( ie_mig_arsize    ),
+  .m_axi_arburst  ( ie_mig_arburst   ),
+  .m_axi_arlock   ( ie_mig_arlock    ),
+  .m_axi_arcache  ( ie_mig_arcache   ),
+  .m_axi_arprot   ( ie_mig_arprot    ),
+  .m_axi_arregion (                  ),
+  .m_axi_arqos    ( ie_mig_arqos     ),
+  .m_axi_arvalid  ( ie_mig_arvalid   ),
+  .m_axi_arready  ( ie_mig_arready   ),
+  .m_axi_rid      ( ie_mig_rid       ),
+  .m_axi_rdata    ( ie_mig_rdata     ),
+  .m_axi_rresp    ( ie_mig_rresp     ),
+  .m_axi_rlast    ( ie_mig_rlast     ),
+  .m_axi_rvalid   ( ie_mig_rvalid    ),
+  .m_axi_rready   ( ie_mig_rready    )
+);
+
+// ---------------
+// AXI read arbiter: merge CPU + IE DMA read paths into single MIG port
+// ---------------
+// Write channels pass through from CPU directly (s_axi_aw/w/b already connected).
+// Only AR/R are arbitrated.
+axi_read_arbiter #(
+  .ADDR_WIDTH ( AxiAddrWidth     ),
+  .DATA_WIDTH ( AxiDataWidth     ),
+  .ID_WIDTH   ( AxiIdWidthSlaves )
+) i_axi_read_arbiter (
+  .clk        ( ddr_clock_out    ),
+  .rst_n      ( ndmreset_n       ),
+  // Port 0: CPU (priority)
+  .p0_arid    ( cpu_dram_arid    ),
+  .p0_araddr  ( cpu_dram_araddr  ),
+  .p0_arlen   ( cpu_dram_arlen   ),
+  .p0_arsize  ( cpu_dram_arsize  ),
+  .p0_arburst ( cpu_dram_arburst ),
+  .p0_arlock  ( cpu_dram_arlock  ),
+  .p0_arcache ( cpu_dram_arcache ),
+  .p0_arprot  ( cpu_dram_arprot  ),
+  .p0_arqos   ( cpu_dram_arqos   ),
+  .p0_arvalid ( cpu_dram_arvalid ),
+  .p0_arready ( cpu_dram_arready ),
+  .p0_rid     ( cpu_dram_rid     ),
+  .p0_rdata   ( cpu_dram_rdata   ),
+  .p0_rresp   ( cpu_dram_rresp   ),
+  .p0_rlast   ( cpu_dram_rlast   ),
+  .p0_rvalid  ( cpu_dram_rvalid  ),
+  .p0_rready  ( cpu_dram_rready  ),
+  // Port 1: IE DMA
+  .p1_arid    ( ie_mig_arid      ),
+  .p1_araddr  ( ie_mig_araddr    ),
+  .p1_arlen   ( ie_mig_arlen     ),
+  .p1_arsize  ( ie_mig_arsize    ),
+  .p1_arburst ( ie_mig_arburst   ),
+  .p1_arlock  ( ie_mig_arlock    ),
+  .p1_arcache ( ie_mig_arcache   ),
+  .p1_arprot  ( ie_mig_arprot    ),
+  .p1_arqos   ( ie_mig_arqos     ),
+  .p1_arvalid ( ie_mig_arvalid   ),
+  .p1_arready ( ie_mig_arready   ),
+  .p1_rid     ( ie_mig_rid       ),
+  .p1_rdata   ( ie_mig_rdata     ),
+  .p1_rresp   ( ie_mig_rresp     ),
+  .p1_rlast   ( ie_mig_rlast     ),
+  .p1_rvalid  ( ie_mig_rvalid    ),
+  .p1_rready  ( ie_mig_rready    ),
+  // Merged downstream → MIG s_axi_ar/r
+  .m_arid     ( s_axi_arid       ),
+  .m_araddr   ( s_axi_araddr     ),
+  .m_arlen    ( s_axi_arlen      ),
+  .m_arsize   ( s_axi_arsize     ),
+  .m_arburst  ( s_axi_arburst    ),
+  .m_arlock   ( s_axi_arlock     ),
+  .m_arcache  ( s_axi_arcache    ),
+  .m_arprot   ( s_axi_arprot     ),
+  .m_arqos    ( s_axi_arqos      ),
+  .m_arvalid  ( s_axi_arvalid    ),
+  .m_arready  ( s_axi_arready    ),
+  .m_rid      ( s_axi_rid        ),
+  .m_rdata    ( s_axi_rdata      ),
+  .m_rresp    ( s_axi_rresp      ),
+  .m_rlast    ( s_axi_rlast      ),
+  .m_rvalid   ( s_axi_rvalid     ),
+  .m_rready   ( s_axi_rready     )
 );
 
 `ifdef NEXYS_VIDEO
