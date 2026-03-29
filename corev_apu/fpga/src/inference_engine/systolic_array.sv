@@ -31,26 +31,12 @@ module systolic_array
   output logic signed [ACC_WIDTH-1:0]   result_out [ARRAY_COLS]
 );
 
-  // Internal wires
-  logic signed [DATA_WIDTH-1:0] w_wire [ARRAY_ROWS+1][ARRAY_COLS];
-  logic signed [DATA_WIDTH-1:0] a_wire [ARRAY_ROWS][ARRAY_COLS+1];
-  logic signed [ACC_WIDTH-1:0]  acc    [ARRAY_ROWS][ARRAY_COLS];
+  // Accumulator array
+  logic signed [ACC_WIDTH-1:0] acc [ARRAY_ROWS][ARRAY_COLS];
 
-  // Inject weights on the top edge
-  always_comb begin
-    for (int c = 0; c < ARRAY_COLS; c++) begin
-      w_wire[0][c] = w_in[c];  // broadcast same weight column
-    end
-  end
-
-  // Inject activations on the left edge
-  always_comb begin
-    for (int r = 0; r < ARRAY_ROWS; r++) begin
-      a_wire[r][0] = a_in[r];  // broadcast same activation row
-    end
-  end
-
-  // Instantiate PE grid
+  // Broadcast PE grid — each PE receives w_in[col] and a_in[row] directly.
+  // This avoids the systolic propagation delay that would misalign weight and
+  // activation indices for any PE not on the top/left edge.
   genvar gr, gc;
   generate
     for (gr = 0; gr < ARRAY_ROWS; gr++) begin : gen_row
@@ -60,10 +46,10 @@ module systolic_array
           .rst_n     (rst_n),
           .enable    (enable),
           .acc_clear (acc_clear),
-          .w_in      (w_wire[gr][gc]),
-          .w_out     (w_wire[gr+1][gc]),
-          .a_in      (a_wire[gr][gc]),
-          .a_out     (a_wire[gr][gc+1]),
+          .w_in      (w_in[gc]),
+          .w_out     (),
+          .a_in      (a_in[gr]),
+          .a_out     (),
           .acc_out   (acc[gr][gc])
         );
       end

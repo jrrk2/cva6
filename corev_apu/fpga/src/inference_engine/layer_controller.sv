@@ -165,7 +165,7 @@ module layer_controller
         if (readout_row == ARRAY_ROWS - 1)
           state_d = S_NEXT_M_TILE;
         else
-          state_d = S_ACTIVATE;  // re-enter activation for next row
+          state_d = S_WRITE_RESULT;  // scatter all 16 columns without re-activating
 
       S_NEXT_M_TILE:
         if (m_tile + ARRAY_COLS >= cur_output_dim)
@@ -287,7 +287,7 @@ module layer_controller
     wbuf_rd_en   = (state_q == S_STREAM) || (state_q == S_CLEAR_ACC);
     wbuf_rd_bank = 1'b0;  // single bank for now
     wbuf_rd_addr = cur_weight_base +
-                   (m_tile >> $clog2(ARRAY_COLS)) * ceil_div(cur_input_dim, ARRAY_ROWS[15:0]) +
+                   (m_tile >> $clog2(ARRAY_COLS)) * (ceil_div(cur_input_dim, ARRAY_ROWS[15:0]) << $clog2(ARRAY_ROWS)) +
                    (k_tile >> $clog2(ARRAY_ROWS)) * ARRAY_ROWS +
                    ((state_q == S_CLEAR_ACC) ? {$clog2(4096){1'b0}} :
                     stream_cnt[$clog2(4096)-1:0] + 1);
@@ -314,7 +314,7 @@ module layer_controller
   end
 
   assign sa_enable    = (state_q == S_STREAM) || (state_q == S_STREAM_DRAIN);
-  assign sa_acc_clear = (state_q == S_CLEAR_ACC);
+  assign sa_acc_clear = (state_q == S_CLEAR_ACC) && (k_tile == '0);
 
   // Bias buffer read
   always_comb begin
@@ -323,7 +323,9 @@ module layer_controller
   end
 
   // Activation unit: feed accumulator + bias
-  assign sa_result_row_sel = readout_row;
+  // Always read row 0: with the broadcast array, acc[0][c] holds the correct
+  // single-image dot product for output neuron m*16+c.
+  assign sa_result_row_sel = '0;
 
   always_comb begin
     act_valid_in = (state_q == S_ACTIVATE);
@@ -332,14 +334,17 @@ module layer_controller
       act_data_in[i] = sa_result_out[i] + bias_reg[i];
   end
 
-  // Write activated results back to activation buffer
+  // Scatter write: all 16 columns' results are computed in one S_ACTIVATE
+  // then written one per cycle during S_WRITE_RESULT.
+  // Column readout_row → byte 0 of address m_tile+readout_row.
+  // The activation unit output registers hold stable after S_ACTIVATE completes.
   always_comb begin
-    abuf_wr_en   = act_valid_out;
-    abuf_wr_bank = ~act_bank;  // write to opposite bank
+    abuf_wr_en   = (state_q == S_WRITE_RESULT);
+    abuf_wr_bank = ~act_bank;
     abuf_wr_addr = m_tile + readout_row;
     for (int i = 0; i < ARRAY_ROWS; i++) begin
-      if (i < ARRAY_COLS)
-        abuf_wr_data[i*DATA_WIDTH +: DATA_WIDTH] = act_data_out[i];
+      if (i == 0)
+        abuf_wr_data[0 +: DATA_WIDTH] = act_data_out[readout_row];
       else
         abuf_wr_data[i*DATA_WIDTH +: DATA_WIDTH] = '0;
     end

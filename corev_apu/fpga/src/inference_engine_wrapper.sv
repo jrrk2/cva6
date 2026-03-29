@@ -10,12 +10,13 @@
 // The wrapper extracts the active 32-bit half of each 64-bit data word
 // using wstrb / address bit [2].
 
-module inference_engine_wrapper
-  import inference_pkg::*;
-#(
+module inference_engine_wrapper #(
   parameter int unsigned AXI_ADDR_WIDTH = 12,
   parameter int unsigned AXI_DATA_WIDTH = 64,   // crossbar data width
-  parameter bit          HAS_DMA        = 1'b0  // Phase 2: enable DMA registers
+  parameter bit          HAS_DMA        = 1'b0, // Phase 2: enable DMA registers
+  parameter int unsigned ARRAY_ROWS     = 16,
+  parameter int unsigned ARRAY_COLS     = 16,
+  parameter int unsigned DATA_WIDTH     = 8
 ) (
   input  logic clk,
   input  logic rst_n,
@@ -279,8 +280,11 @@ module inference_engine_wrapper
 
       // ---- DMA engine ----
       ie_dram_reader #(
-        .WBUF_DEPTH ( 4096 ),
-        .ABUF_DEPTH ( 1024 )
+        .WBUF_DEPTH  ( 4096       ),
+        .ABUF_DEPTH  ( 1024       ),
+        .ARRAY_ROWS  ( ARRAY_ROWS ),
+        .ARRAY_COLS  ( ARRAY_COLS ),
+        .DATA_WIDTH  ( DATA_WIDTH )
       ) u_dma (
         .clk   ( clk   ),
         .rst_n ( rst_n ),

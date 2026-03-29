@@ -12,11 +12,12 @@
 //   0x10: DMA_LEN       Number of 128-bit words to transfer [15:0]
 //   0x14: DMA_TARGET    [0] 0=weight_buf, 1=activation_buf
 
-module ie_dram_reader
-  import inference_pkg::*;
-#(
-  parameter int unsigned WBUF_DEPTH = 4096,
-  parameter int unsigned ABUF_DEPTH = 1024
+module ie_dram_reader #(
+  parameter int unsigned WBUF_DEPTH   = 4096,
+  parameter int unsigned ABUF_DEPTH   = 1024,
+  parameter int unsigned ARRAY_ROWS   = 16,
+  parameter int unsigned ARRAY_COLS   = 16,
+  parameter int unsigned DATA_WIDTH   = 8
 ) (
   input  logic clk,
   input  logic rst_n,
@@ -114,6 +115,7 @@ module ie_dram_reader
   logic [15:0] length_q;
   logic        target_q;   // 0 = weight buffer, 1 = activation buffer
   logic        start_pulse;
+  logic        done_clear;  // W1C pulse from CSR write
   logic        busy;
   logic        done;
 
@@ -124,13 +126,15 @@ module ie_dram_reader
       length_q    <= '0;
       target_q    <= 1'b0;
       start_pulse <= 1'b0;
+      done_clear  <= 1'b0;
     end else begin
       start_pulse <= 1'b0;
+      done_clear  <= 1'b0;
       if (do_write) begin
         case (aw_addr_q[7:0])
           8'h00: begin
             if (s_axi_wdata[0]) start_pulse <= 1'b1;
-            if (s_axi_wdata[2]) done <= 1'b0;       // W1C done
+            if (s_axi_wdata[2]) done_clear  <= 1'b1; // W1C done (pulse)
           end
           8'h04: src_addr_q[31:0]  <= s_axi_wdata;
           8'h08: src_addr_q[63:32] <= s_axi_wdata;
@@ -157,7 +161,7 @@ module ie_dram_reader
         8'h0C: s_axi_rdata <= {20'b0, dst_addr_q};
         8'h10: s_axi_rdata <= {16'b0, length_q};
         8'h14: s_axi_rdata <= {31'b0, target_q};
-        default: s_axi_rdata <= 32'hDEAD_DMA0;
+        default: s_axi_rdata <= 32'hDEAD_D1A0;
       endcase
     end else if (s_axi_rvalid && s_axi_rready)
       s_axi_rvalid <= 1'b0;
@@ -208,6 +212,7 @@ module ie_dram_reader
       case (state)
         // --------------------------------------------------------
         DMA_IDLE: begin
+          if (done_clear) done <= 1'b0;
           if (start_pulse && !busy && length_q != '0) begin
             busy          <= 1'b1;
             done          <= 1'b0;
