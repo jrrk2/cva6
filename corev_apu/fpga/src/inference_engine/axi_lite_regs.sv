@@ -7,10 +7,20 @@
 //   0x00C: VERSION     — build version (RO), increment on each RTL change
 //   0x018: ABUF_RD_ADDR — activation buffer readback address (RW)
 //   0x01C: ABUF_RD_BANK — activation buffer readback bank select (RW)
-//   0x020: ABUF_RD_DATA_0 — readback data [31:0] (RO)
-//   0x024: ABUF_RD_DATA_1 — readback data [63:32] (RO)
-//   0x028: ABUF_RD_DATA_2 — readback data [95:64] (RO)
+//   0x020: ABUF_RD_DATA_0 — readback data [31:0]   (RO)
+//   0x024: ABUF_RD_DATA_1 — readback data [63:32]  (RO)
+//   0x028: ABUF_RD_DATA_2 — readback data [95:64]  (RO)
 //   0x02C: ABUF_RD_DATA_3 — readback data [127:96] (RO)
+//   0x030: ABUF_RD_DATA_4 — readback data [159:128](RO)  INT16 extension
+//   0x034: ABUF_RD_DATA_5 — readback data [191:160](RO)
+//   0x038: ABUF_RD_DATA_6 — readback data [223:192](RO)
+//   0x03C: ABUF_RD_DATA_7 — readback data [255:224](RO)
+//
+//   0x040–0x04C: Debug registers (moved from 0x030 to make room for ABUF_RD_DATA_4..7)
+//     0x040: DBG_WR_COUNT
+//     0x044: DBG_WR_DATA0
+//     0x048: DBG_WR_DATA1
+//     0x04C: DBG_WR_INFO
 //
 //   0x200–0x2FF: Bias buffer write port
 //     0x200: BBUF_ADDR   — write address
@@ -23,13 +33,17 @@
 //     +0x0C: weight_addr
 //     +0x10: bias_addr
 //
-//   0x100–0x114: BRAM staging write port (for CPU-driven weight/activation loading)
+//   0x100–0x124: BRAM staging write port (for CPU-driven weight/activation loading)
 //     0x100: MEM_TARGET  — [0] 0=weight_buf, 1=activation_buf
 //     0x104: MEM_ADDR    — BRAM write address
 //     0x108: MEM_DATA_0  — staging word [31:0]
 //     0x10C: MEM_DATA_1  — staging word [63:32]
 //     0x110: MEM_DATA_2  — staging word [95:64]
-//     0x114: MEM_DATA_3  — staging word [127:96], write triggers 128-bit commit
+//     0x114: MEM_DATA_3  — staging word [127:96]
+//     0x118: MEM_DATA_4  — staging word [159:128]
+//     0x11C: MEM_DATA_5  — staging word [191:160]
+//     0x120: MEM_DATA_6  — staging word [223:192]
+//     0x124: MEM_DATA_7  — staging word [255:224], write triggers 256-bit commit
 //
 // Weight and activation buffer writes can also come from the UDP bridge
 // (CMD_MEM_WRITE = 0x04) bypassing AXI-Lite for reliable wide-word BRAM writes.
@@ -39,7 +53,7 @@ module axi_lite_regs
 #(
   parameter int unsigned ADDR_WIDTH = 12,
   parameter int unsigned DATA_WIDTH_AXI = 32,
-  parameter int unsigned VERSION = 32'd12
+  parameter int unsigned VERSION = 32'd13
 ) (
   input  logic clk,
   input  logic rst_n,
@@ -170,9 +184,10 @@ module axi_lite_regs
   logic [11:0] bbuf_addr_reg;
 
   // BRAM staging registers (CPU-driven weight/activation loading)
+  // 8 × 32-bit = 256-bit word (INT16: ARRAY_COLS × DATA_WIDTH = 16 × 16)
   logic        mem_target_reg;  // 0=weight, 1=activation
   logic [$clog2(4096)-1:0] mem_addr_reg;
-  logic [31:0] mem_staging [4]; // 4 x 32-bit = 128-bit
+  logic [31:0] mem_staging [8]; // 8 x 32-bit = 256-bit
   logic        mem_commit;
 
   always_ff @(posedge clk) begin
@@ -187,7 +202,7 @@ module axi_lite_regs
       mem_target_reg   <= 1'b0;
       mem_addr_reg     <= '0;
       mem_commit       <= 1'b0;
-      for (int i = 0; i < 4; i++)
+      for (int i = 0; i < 8; i++)
         mem_staging[i] <= '0;
       for (int i = 0; i < MAX_LAYERS; i++) begin
         layer_input_dim[i]   <= '0;
@@ -213,15 +228,19 @@ module axi_lite_regs
             endcase
           end
 
-          4'h1: begin // BRAM staging write port
-            case (aw_addr_q[4:0])
-              5'h00: mem_target_reg <= s_axi_wdata[0];
-              5'h04: mem_addr_reg   <= s_axi_wdata[$clog2(4096)-1:0];
-              5'h08: mem_staging[0] <= s_axi_wdata;
-              5'h0C: mem_staging[1] <= s_axi_wdata;
-              5'h10: mem_staging[2] <= s_axi_wdata;
-              5'h14: begin
-                mem_staging[3] <= s_axi_wdata;
+          4'h1: begin // BRAM staging write port (256-bit, 8 x 32-bit words)
+            case (aw_addr_q[5:0])
+              6'h00: mem_target_reg <= s_axi_wdata[0];
+              6'h04: mem_addr_reg   <= s_axi_wdata[$clog2(4096)-1:0];
+              6'h08: mem_staging[0] <= s_axi_wdata;
+              6'h0C: mem_staging[1] <= s_axi_wdata;
+              6'h10: mem_staging[2] <= s_axi_wdata;
+              6'h14: mem_staging[3] <= s_axi_wdata;
+              6'h18: mem_staging[4] <= s_axi_wdata;
+              6'h1C: mem_staging[5] <= s_axi_wdata;
+              6'h20: mem_staging[6] <= s_axi_wdata;
+              6'h24: begin
+                mem_staging[7] <= s_axi_wdata;
                 mem_commit     <= 1'b1;
               end
               default: ;
@@ -269,11 +288,12 @@ module axi_lite_regs
       bbuf_wr_data[i*BIAS_WIDTH +: BIAS_WIDTH] = bbuf_staging;
   end
 
-  // BRAM staging write outputs
+  // BRAM staging write outputs (256-bit, commit on DATA_7)
   assign mem_wr_en     = mem_commit;
   assign mem_wr_target = mem_target_reg;
   assign mem_wr_addr   = mem_addr_reg;
-  assign mem_wr_data   = {mem_staging[3], mem_staging[2], mem_staging[1], mem_staging[0]};
+  assign mem_wr_data   = {mem_staging[7], mem_staging[6], mem_staging[5], mem_staging[4],
+                          mem_staging[3], mem_staging[2], mem_staging[1], mem_staging[0]};
 
   // Activation buffer readback (active when engine is idle)
   assign abuf_rd_en   = 1'b1;  // always reading — BRAM can handle it
@@ -300,16 +320,24 @@ module axi_lite_regs
         12'h024: s_axi_rdata <= abuf_rd_data[63:32];
         12'h028: s_axi_rdata <= abuf_rd_data[95:64];
         12'h02C: s_axi_rdata <= abuf_rd_data[127:96];
-        12'h030: s_axi_rdata <= dbg_wr_count;
-        12'h034: s_axi_rdata <= dbg_wr_data0;
-        12'h038: s_axi_rdata <= dbg_wr_data1;
-        12'h03C: s_axi_rdata <= dbg_wr_info;
+        12'h030: s_axi_rdata <= abuf_rd_data[159:128];
+        12'h034: s_axi_rdata <= abuf_rd_data[191:160];
+        12'h038: s_axi_rdata <= abuf_rd_data[223:192];
+        12'h03C: s_axi_rdata <= abuf_rd_data[255:224];
+        12'h040: s_axi_rdata <= dbg_wr_count;
+        12'h044: s_axi_rdata <= dbg_wr_data0;
+        12'h048: s_axi_rdata <= dbg_wr_data1;
+        12'h04C: s_axi_rdata <= dbg_wr_info;
         12'h100: s_axi_rdata <= {31'b0, mem_target_reg};
         12'h104: s_axi_rdata <= {{(32-$clog2(4096)){1'b0}}, mem_addr_reg};
         12'h108: s_axi_rdata <= mem_staging[0];
         12'h10C: s_axi_rdata <= mem_staging[1];
         12'h110: s_axi_rdata <= mem_staging[2];
         12'h114: s_axi_rdata <= mem_staging[3];
+        12'h118: s_axi_rdata <= mem_staging[4];
+        12'h11C: s_axi_rdata <= mem_staging[5];
+        12'h120: s_axi_rdata <= mem_staging[6];
+        12'h124: s_axi_rdata <= mem_staging[7];
         default: s_axi_rdata <= 32'hDEAD_BEEF;
       endcase
     end else if (s_axi_rready) begin

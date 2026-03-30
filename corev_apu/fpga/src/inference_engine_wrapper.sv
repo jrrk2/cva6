@@ -16,7 +16,7 @@ module inference_engine_wrapper #(
   parameter bit          HAS_DMA        = 1'b0, // Phase 2: enable DMA registers
   parameter int unsigned ARRAY_ROWS     = 16,
   parameter int unsigned ARRAY_COLS     = 16,
-  parameter int unsigned DATA_WIDTH     = 8
+  parameter int unsigned DATA_WIDTH     = 16
 ) (
   input  logic clk,
   input  logic rst_n,

@@ -6,7 +6,8 @@
 //   - 2,060 BRAM36K (37,080 Kb)
 //   - 303,600 LUTs
 //
-// Design point: 16x16 systolic array, INT8 data, INT32 accumulators
+// Design point: 16x16 systolic array, INT16 data, INT48 accumulators
+//   - Each PE maps to one DSP48E1 (25×18 signed multiplier, 48-bit accumulator)
 //   - DSP usage:  256 DSP48E1 (9.1% of 2,800)
 //   - Leaves headroom for multi-array or larger networks
 
@@ -17,8 +18,8 @@ package inference_pkg;
   localparam int unsigned ARRAY_COLS = 16;  // input features consumed in parallel
 
   // ---- Data widths ----
-  localparam int unsigned DATA_WIDTH = 8;   // INT8 weights & activations
-  localparam int unsigned ACC_WIDTH  = 32;  // accumulator width (avoids overflow)
+  localparam int unsigned DATA_WIDTH = 16;  // INT16 weights & activations
+  localparam int unsigned ACC_WIDTH  = 48;  // 48-bit DSP48E1 accumulator
   localparam int unsigned BIAS_WIDTH = 32;  // bias stored in full precision
 
   // ---- Network geometry limits ----

@@ -1,15 +1,16 @@
 // ie_dram_reader.sv — DMA read controller for weight/activation loading
 //
 // Transfers data from DRAM to inference engine BRAM buffers via AXI4
-// read bursts.  Each 128-bit BRAM word is assembled from two 64-bit
-// AXI beats (low half first, high half second).
+// read bursts.  Each BRAM word (ARRAY_COLS×DATA_WIDTH bits) is assembled
+// from BEATS_PW consecutive 64-bit AXI beats (low beat first).
+// INT16: BEATS_PW=4 (256-bit words).  INT8: BEATS_PW=2 (128-bit words).
 //
 // CSR map (active at wrapper offset 0x800):
 //   0x00: DMA_CTRL      [0] start (W1S), [1] busy (RO), [2] done (RO/W1C)
 //   0x04: DMA_SRC_LO    DRAM source address [31:0]
 //   0x08: DMA_SRC_HI    DRAM source address [63:32]
 //   0x0C: DMA_DST_ADDR  BRAM destination start address [11:0]
-//   0x10: DMA_LEN       Number of 128-bit words to transfer [15:0]
+//   0x10: DMA_LEN       Number of 256-bit BRAM words to transfer [15:0]
 //   0x14: DMA_TARGET    [0] 0=weight_buf, 1=activation_buf
 
 module ie_dram_reader #(
@@ -17,7 +18,7 @@ module ie_dram_reader #(
   parameter int unsigned ABUF_DEPTH   = 1024,
   parameter int unsigned ARRAY_ROWS   = 16,
   parameter int unsigned ARRAY_COLS   = 16,
-  parameter int unsigned DATA_WIDTH   = 8
+  parameter int unsigned DATA_WIDTH   = 16
 ) (
   input  logic clk,
   input  logic rst_n,
@@ -179,24 +180,29 @@ module ie_dram_reader #(
     DMA_RCOLLECT
   } dma_state_e;
 
+  // BRAM word geometry derived from data width
+  localparam int unsigned WORD_BITS  = ARRAY_COLS * DATA_WIDTH; // 256 for INT16
+  localparam int unsigned BEATS_PW   = WORD_BITS / 64;          // 4 for INT16
+  localparam int unsigned ADDR_SHIFT = $clog2(WORD_BITS / 8);   // 5 for INT16
+
   dma_state_e state;
-  logic [15:0] words_done;   // 128-bit words transferred so far
-  logic        beat_phase;   // 0 = collecting low 64 bits, 1 = high 64 bits
-  logic [63:0] low_half_q;
+  logic [15:0] words_done;         // BRAM words transferred so far
+  logic [1:0]  beat_phase;         // current beat within a BRAM word (0..BEATS_PW-1)
+  logic [WORD_BITS-1:0] accum_q;   // shift register assembling the current BRAM word
 
   // Burst geometry (combinational, derived from current state)
   wire [15:0] remaining   = length_q - words_done;
   wire [15:0] burst_words = (remaining >= 16'd8) ? 16'd8 : remaining;
-  wire [63:0] burst_addr  = src_addr_q + ({48'b0, words_done} << 4);
+  wire [63:0] burst_addr  = src_addr_q + ({48'b0, words_done} << ADDR_SHIFT);
   wire [11:0] bram_addr   = dst_addr_q + words_done[11:0];
 
   assign m_axi_araddr  = burst_addr;
-  assign m_axi_arlen   = {burst_words[6:0], 1'b0} - 8'd1; // 2 beats per word, minus 1
+  assign m_axi_arlen   = 8'(burst_words * BEATS_PW) - 8'd1; // beats per burst, minus 1
   assign m_axi_arsize  = 3'b011;  // 8 bytes per beat
   assign m_axi_arburst = 2'b01;   // INCR
 
   wire r_beat  = m_axi_rvalid & m_axi_rready;
-  wire bram_wr = r_beat & beat_phase;
+  wire bram_wr = r_beat & (beat_phase == 2'(BEATS_PW - 1));
 
   always_ff @(posedge clk) begin
     if (!rst_n) begin
@@ -206,8 +212,8 @@ module ie_dram_reader #(
       busy          <= 1'b0;
       done          <= 1'b0;
       words_done    <= '0;
-      beat_phase    <= 1'b0;
-      low_half_q    <= '0;
+      beat_phase    <= 2'd0;
+      accum_q       <= '0;
     end else begin
       case (state)
         // --------------------------------------------------------
@@ -217,7 +223,8 @@ module ie_dram_reader #(
             busy          <= 1'b1;
             done          <= 1'b0;
             words_done    <= '0;
-            beat_phase    <= 1'b0;
+            beat_phase    <= 2'd0;
+            accum_q       <= '0;
             m_axi_arvalid <= 1'b1;   // issue first AR immediately
             state         <= DMA_AR;
           end
@@ -235,16 +242,16 @@ module ie_dram_reader #(
         // --------------------------------------------------------
         DMA_RCOLLECT: begin
           if (r_beat) begin
-            if (!beat_phase) begin
-              low_half_q <= m_axi_rdata;
-              beat_phase <= 1'b1;
-            end else begin
-              beat_phase <= 1'b0;
+            // Shift accumulator: new beat enters at top, previous beats shift down
+            accum_q    <= {m_axi_rdata, accum_q[WORD_BITS-1:64]};
+            beat_phase <= beat_phase + 2'd1;
+            if (beat_phase == 2'(BEATS_PW - 1)) begin
+              beat_phase <= 2'd0;
               words_done <= words_done + 16'd1;
             end
           end
 
-          // End of burst
+          // End of burst — rlast always aligns with beat_phase == BEATS_PW-1
           if (r_beat && m_axi_rlast) begin
             m_axi_rready <= 1'b0;
             // words_done + 1 accounts for the current (just-completing) word
@@ -267,7 +274,9 @@ module ie_dram_reader #(
   // ================================================================
   //  BRAM write outputs
   // ================================================================
-  wire [ARRAY_COLS*DATA_WIDTH-1:0] bram_wr_data = {m_axi_rdata, low_half_q};
+  // On the last beat of a word, accum_q holds beats [BEATS_PW-2:0] shifted down,
+  // and m_axi_rdata is beat BEATS_PW-1.  Full word: {last_beat, accum_q[WORD_BITS-1:64]}.
+  wire [WORD_BITS-1:0] bram_wr_data = {m_axi_rdata, accum_q[WORD_BITS-1:64]};
 
   always_comb begin
     ext_wbuf_wr_en   = 1'b0;
