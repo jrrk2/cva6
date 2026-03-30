@@ -16,7 +16,8 @@ module inference_engine_wrapper #(
   parameter bit          HAS_DMA        = 1'b0, // Phase 2: enable DMA registers
   parameter int unsigned ARRAY_ROWS     = 16,
   parameter int unsigned ARRAY_COLS     = 16,
-  parameter int unsigned DATA_WIDTH     = 16
+  parameter int unsigned DATA_WIDTH     = 16,
+  parameter int unsigned WBUF_DEPTH     = 16384
 ) (
   input  logic clk,
   input  logic rst_n,
@@ -128,7 +129,7 @@ module inference_engine_wrapper #(
   // ================================================================
   //  Inference Engine Core (always present)
   // ================================================================
-  inference_engine_top u_ie (
+  inference_engine_top #(.WBUF_DEPTH(WBUF_DEPTH)) u_ie (
     .clk              (clk),
     .rst_n            (rst_n),
     .s_axi_awaddr     (core_awaddr),
@@ -280,7 +281,7 @@ module inference_engine_wrapper #(
 
       // ---- DMA engine ----
       ie_dram_reader #(
-        .WBUF_DEPTH  ( 4096       ),
+        .WBUF_DEPTH  ( WBUF_DEPTH ),
         .ABUF_DEPTH  ( 1024       ),
         .ARRAY_ROWS  ( ARRAY_ROWS ),
         .ARRAY_COLS  ( ARRAY_COLS ),

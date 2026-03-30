@@ -1,14 +1,14 @@
 // weight_buffer.sv — BRAM for weight storage
 //
 // Each word is ARRAY_COLS * DATA_WIDTH = 16 * 8 = 128 bits wide
-// Depth: 4096 words -> 64 KB
+// Default depth: 16384 words -> 256 KB
 //
 // Simple dual-port: one write port, one read port.
 
 module weight_buffer
   import inference_pkg::*;
 #(
-  parameter int unsigned DEPTH = 4096
+  parameter int unsigned DEPTH = 16384
 ) (
   input  logic clk,
   input  logic rst_n,

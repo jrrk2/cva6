@@ -25,7 +25,9 @@
 
 module inference_engine_top
   import inference_pkg::*;
-(
+#(
+  parameter int unsigned WBUF_DEPTH = 16384
+) (
   input  logic clk,
   input  logic rst_n,
 
@@ -54,7 +56,7 @@ module inference_engine_top
 
   // Direct BRAM write from UDP bridge (port A of dual-port buffers)
   input  logic                             ext_wbuf_wr_en,
-  input  logic [$clog2(4096)-1:0]         ext_wbuf_wr_addr,
+  input  logic [$clog2(WBUF_DEPTH)-1:0]   ext_wbuf_wr_addr,
   input  logic [ARRAY_COLS*DATA_WIDTH-1:0] ext_wbuf_wr_data,
 
   input  logic                             ext_abuf_wr_en,
@@ -83,7 +85,7 @@ module inference_engine_top
   // Weight buffer signals (port B — layer controller read)
   logic                             wbuf_rd_en;
   logic                             wbuf_rd_bank;
-  logic [$clog2(4096)-1:0]         wbuf_rd_addr;
+  logic [$clog2(WBUF_DEPTH)-1:0]   wbuf_rd_addr;
   logic [ARRAY_COLS*DATA_WIDTH-1:0] wbuf_rd_data;
 
   // Bias buffer signals
@@ -100,12 +102,12 @@ module inference_engine_top
   // BRAM staging write from AXI regs (CPU-driven loading)
   logic                              mem_wr_en;
   logic                              mem_wr_target;
-  logic [$clog2(4096)-1:0]          mem_wr_addr;
+  logic [$clog2(WBUF_DEPTH)-1:0]    mem_wr_addr;
   logic [ARRAY_COLS*DATA_WIDTH-1:0] mem_wr_data;
 
   // Combined BRAM write signals (external OR staging)
   logic                              wbuf_a_wr_en;
-  logic [$clog2(4096)-1:0]          wbuf_a_wr_addr;
+  logic [$clog2(WBUF_DEPTH)-1:0]    wbuf_a_wr_addr;
   logic [ARRAY_COLS*DATA_WIDTH-1:0] wbuf_a_wr_data;
 
   logic                              ext_or_stg_abuf_wr_en;
@@ -210,7 +212,7 @@ module inference_engine_top
   // ---- Module instantiations ----
 
   // AXI-Lite register file (control, bias writes, readback)
-  axi_lite_regs u_axi_regs (
+  axi_lite_regs #(.WBUF_DEPTH(WBUF_DEPTH)) u_axi_regs (
     .clk                 (clk),
     .rst_n               (rst_n),
     .s_axi_awaddr        (s_axi_awaddr),
@@ -258,7 +260,7 @@ module inference_engine_top
   );
 
   // Weight buffer — simple dual-port (port A: bridge/staging write, port B: controller read)
-  weight_buffer u_weight_buf (
+  weight_buffer #(.DEPTH(WBUF_DEPTH)) u_weight_buf (
     .clk     (clk),
     .rst_n   (rst_n),
     .wr_en   (wbuf_a_wr_en),
@@ -326,7 +328,7 @@ module inference_engine_top
   );
 
   // Layer controller (FSM)
-  layer_controller u_ctrl (
+  layer_controller #(.WBUF_DEPTH(WBUF_DEPTH)) u_ctrl (
     .clk               (clk),
     .rst_n             (rst_n),
     .start             (engine_start),

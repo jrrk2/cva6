@@ -51,9 +51,10 @@
 module axi_lite_regs
   import inference_pkg::*;
 #(
-  parameter int unsigned ADDR_WIDTH = 12,
+  parameter int unsigned ADDR_WIDTH     = 12,
   parameter int unsigned DATA_WIDTH_AXI = 32,
-  parameter int unsigned VERSION = 32'd13
+  parameter int unsigned WBUF_DEPTH     = 16384,
+  parameter int unsigned VERSION        = 32'd14
 ) (
   input  logic clk,
   input  logic rst_n,
@@ -109,7 +110,7 @@ module axi_lite_regs
   // BRAM staging write ports (for CPU-driven weight/activation loading)
   output logic                               mem_wr_en,
   output logic                               mem_wr_target,  // 0=weight, 1=activation
-  output logic [$clog2(4096)-1:0]            mem_wr_addr,
+  output logic [$clog2(WBUF_DEPTH)-1:0]      mem_wr_addr,
   output logic [ARRAY_COLS*DATA_WIDTH-1:0]   mem_wr_data,
 
   // Debug: port B write snoop
@@ -186,7 +187,7 @@ module axi_lite_regs
   // BRAM staging registers (CPU-driven weight/activation loading)
   // 8 × 32-bit = 256-bit word (INT16: ARRAY_COLS × DATA_WIDTH = 16 × 16)
   logic        mem_target_reg;  // 0=weight, 1=activation
-  logic [$clog2(4096)-1:0] mem_addr_reg;
+  logic [$clog2(WBUF_DEPTH)-1:0] mem_addr_reg;
   logic [31:0] mem_staging [8]; // 8 x 32-bit = 256-bit
   logic        mem_commit;
 
@@ -231,7 +232,7 @@ module axi_lite_regs
           4'h1: begin // BRAM staging write port (256-bit, 8 x 32-bit words)
             case (aw_addr_q[5:0])
               6'h00: mem_target_reg <= s_axi_wdata[0];
-              6'h04: mem_addr_reg   <= s_axi_wdata[$clog2(4096)-1:0];
+              6'h04: mem_addr_reg   <= s_axi_wdata[$clog2(WBUF_DEPTH)-1:0];
               6'h08: mem_staging[0] <= s_axi_wdata;
               6'h0C: mem_staging[1] <= s_axi_wdata;
               6'h10: mem_staging[2] <= s_axi_wdata;
@@ -295,9 +296,55 @@ module axi_lite_regs
   assign mem_wr_data   = {mem_staging[7], mem_staging[6], mem_staging[5], mem_staging[4],
                           mem_staging[3], mem_staging[2], mem_staging[1], mem_staging[0]};
 
-  // Activation buffer readback (active when engine is idle)
-  assign abuf_rd_en   = 1'b1;  // always reading — BRAM can handle it
-  assign abuf_rd_addr = abuf_rd_addr_reg;
+  // ---- Packed readback FSM -----------------------------------------------
+  // When CPU writes ABUF_RD_ADDR = N (packed index, where N = output_idx/16),
+  // the FSM reads ABUF addresses N*16, N*16+1, ..., N*16+15 on 16 consecutive
+  // cycles and stores the INT16 value (bits[DATA_WIDTH-1:0]) from each into
+  // pack_buf[0..15].  DATA_0..DATA_7 expose 2 INT16 per 32-bit register.
+  // Total FSM latency: 17 cycles (~340 ns at 50 MHz).
+  // The CPU VERSION read between ADDR write and DATA reads provides sufficient
+  // dead time (> 2 µs >> 340 ns).
+  //
+  // Backward-compatible: calling code writes ABUF_RD_ADDR = output_idx/ARRAY_COLS
+  // and reads DATA_r where r = (output_idx % ARRAY_COLS)/2, bit field = [15+(idx&1)*16:idx&1*16].
+
+  logic [4:0]  pack_ctr;      // 0..17 (16 read cycles + 2 BRAM pipeline stages)
+  logic        pack_active;
+  logic [DATA_WIDTH-1:0]       pack_buf [16];
+  logic [$clog2(1024)-1:0]     pack_base_q;
+
+  // Detect write to ABUF_RD_ADDR (0x018)
+  wire abuf_rd_addr_wr = do_write && (aw_addr_q[11:0] == 12'h018);
+
+  always_ff @(posedge clk) begin
+    if (!rst_n) begin
+      pack_active <= 1'b0;
+      pack_ctr    <= 5'd0;
+      pack_base_q <= '0;
+      for (int i = 0; i < 16; i++) pack_buf[i] <= '0;
+    end else begin
+      if (abuf_rd_addr_wr) begin
+        pack_active <= 1'b1;
+        pack_ctr    <= 5'd0;
+        pack_base_q <= ($clog2(1024))'(s_axi_wdata[$clog2(1024)-1:0]);
+      end else if (pack_active) begin
+        pack_ctr <= pack_ctr + 5'd1;
+        // ABUF Port A has 2-cycle latency: addr driven at cycle N → data valid at N+2
+        if (pack_ctr >= 5'd2 && pack_ctr <= 5'd17)
+          pack_buf[pack_ctr - 5'd2] <= abuf_rd_data[DATA_WIDTH-1:0];
+        if (pack_ctr == 5'd17)
+          pack_active <= 1'b0;
+      end
+    end
+  end
+
+  // During packing, drive each of the 16 consecutive addresses
+  wire [$clog2(1024)-1:0] pack_addr =
+    ($clog2(1024))'({pack_base_q, 4'b0} | {6'b0, pack_ctr[3:0]});
+
+  // Activation buffer readback
+  assign abuf_rd_en   = 1'b1;
+  assign abuf_rd_addr = pack_active ? pack_addr : abuf_rd_addr_reg;
   assign abuf_rd_bank = abuf_rd_bank_reg;
 
   // ---- Read path ----
@@ -316,20 +363,22 @@ module axi_lite_regs
         12'h00C: s_axi_rdata <= VERSION;
         12'h018: s_axi_rdata <= {{(32-$clog2(1024)){1'b0}}, abuf_rd_addr_reg};
         12'h01C: s_axi_rdata <= {31'b0, abuf_rd_bank_reg};
-        12'h020: s_axi_rdata <= abuf_rd_data[31:0];
-        12'h024: s_axi_rdata <= abuf_rd_data[63:32];
-        12'h028: s_axi_rdata <= abuf_rd_data[95:64];
-        12'h02C: s_axi_rdata <= abuf_rd_data[127:96];
-        12'h030: s_axi_rdata <= abuf_rd_data[159:128];
-        12'h034: s_axi_rdata <= abuf_rd_data[191:160];
-        12'h038: s_axi_rdata <= abuf_rd_data[223:192];
-        12'h03C: s_axi_rdata <= abuf_rd_data[255:224];
+        /* DATA_0..DATA_7: packed readback, 2 × INT16 per 32-bit register.
+         * pack_buf[2r+1:2r] → DATA_r bits [31:16] and [15:0] respectively. */
+        12'h020: s_axi_rdata <= {pack_buf[1],  pack_buf[0]};
+        12'h024: s_axi_rdata <= {pack_buf[3],  pack_buf[2]};
+        12'h028: s_axi_rdata <= {pack_buf[5],  pack_buf[4]};
+        12'h02C: s_axi_rdata <= {pack_buf[7],  pack_buf[6]};
+        12'h030: s_axi_rdata <= {pack_buf[9],  pack_buf[8]};
+        12'h034: s_axi_rdata <= {pack_buf[11], pack_buf[10]};
+        12'h038: s_axi_rdata <= {pack_buf[13], pack_buf[12]};
+        12'h03C: s_axi_rdata <= {pack_buf[15], pack_buf[14]};
         12'h040: s_axi_rdata <= dbg_wr_count;
         12'h044: s_axi_rdata <= dbg_wr_data0;
         12'h048: s_axi_rdata <= dbg_wr_data1;
         12'h04C: s_axi_rdata <= dbg_wr_info;
         12'h100: s_axi_rdata <= {31'b0, mem_target_reg};
-        12'h104: s_axi_rdata <= {{(32-$clog2(4096)){1'b0}}, mem_addr_reg};
+        12'h104: s_axi_rdata <= {{(32-$clog2(WBUF_DEPTH)){1'b0}}, mem_addr_reg};
         12'h108: s_axi_rdata <= mem_staging[0];
         12'h10C: s_axi_rdata <= mem_staging[1];
         12'h110: s_axi_rdata <= mem_staging[2];

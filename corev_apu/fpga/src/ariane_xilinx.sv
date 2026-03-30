@@ -1246,10 +1246,11 @@ logic [1:0]  ie_dma_rresp;
 logic        ie_dma_rlast, ie_dma_rvalid, ie_dma_rready;
 
 inference_engine_wrapper #(
-    .AXI_ADDR_WIDTH ( 12   ),
-    .AXI_DATA_WIDTH ( 64   ),
-    .HAS_DMA        ( 1'b1 ),
-    .DATA_WIDTH     ( 16   )
+    .AXI_ADDR_WIDTH ( 12    ),
+    .AXI_DATA_WIDTH ( 64    ),
+    .HAS_DMA        ( 1'b1  ),
+    .DATA_WIDTH     ( 16    ),
+    .WBUF_DEPTH     ( 16384 )
 ) i_inference_engine (
     .clk   ( clk        ),
     .rst_n ( ndmreset_n ),

@@ -14,7 +14,7 @@
 //   0x14: DMA_TARGET    [0] 0=weight_buf, 1=activation_buf
 
 module ie_dram_reader #(
-  parameter int unsigned WBUF_DEPTH   = 4096,
+  parameter int unsigned WBUF_DEPTH   = 16384,
   parameter int unsigned ABUF_DEPTH   = 1024,
   parameter int unsigned ARRAY_ROWS   = 16,
   parameter int unsigned ARRAY_COLS   = 16,
@@ -112,7 +112,7 @@ module ie_dram_reader #(
   //  CSR registers
   // ================================================================
   logic [63:0] src_addr_q;
-  logic [11:0] dst_addr_q;
+  logic [$clog2(WBUF_DEPTH)-1:0] dst_addr_q;
   logic [15:0] length_q;
   logic        target_q;   // 0 = weight buffer, 1 = activation buffer
   logic        start_pulse;
@@ -139,7 +139,7 @@ module ie_dram_reader #(
           end
           8'h04: src_addr_q[31:0]  <= s_axi_wdata;
           8'h08: src_addr_q[63:32] <= s_axi_wdata;
-          8'h0C: dst_addr_q        <= s_axi_wdata[11:0];
+          8'h0C: dst_addr_q        <= s_axi_wdata[$clog2(WBUF_DEPTH)-1:0];
           8'h10: length_q          <= s_axi_wdata[15:0];
           8'h14: target_q          <= s_axi_wdata[0];
           default: ;
@@ -159,7 +159,7 @@ module ie_dram_reader #(
         8'h00: s_axi_rdata <= {29'b0, done, busy, 1'b0};
         8'h04: s_axi_rdata <= src_addr_q[31:0];
         8'h08: s_axi_rdata <= src_addr_q[63:32];
-        8'h0C: s_axi_rdata <= {20'b0, dst_addr_q};
+        8'h0C: s_axi_rdata <= {{(32-$clog2(WBUF_DEPTH)){1'b0}}, dst_addr_q};
         8'h10: s_axi_rdata <= {16'b0, length_q};
         8'h14: s_axi_rdata <= {31'b0, target_q};
         default: s_axi_rdata <= 32'hDEAD_D1A0;
@@ -194,7 +194,7 @@ module ie_dram_reader #(
   wire [15:0] remaining   = length_q - words_done;
   wire [15:0] burst_words = (remaining >= 16'd8) ? 16'd8 : remaining;
   wire [63:0] burst_addr  = src_addr_q + ({48'b0, words_done} << ADDR_SHIFT);
-  wire [11:0] bram_addr   = dst_addr_q + words_done[11:0];
+  wire [$clog2(WBUF_DEPTH)-1:0] bram_addr = dst_addr_q + words_done[$clog2(WBUF_DEPTH)-1:0];
 
   assign m_axi_araddr  = burst_addr;
   assign m_axi_arlen   = 8'(burst_words * BEATS_PW) - 8'd1; // beats per burst, minus 1

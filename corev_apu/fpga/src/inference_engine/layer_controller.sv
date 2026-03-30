@@ -18,7 +18,9 @@
 
 module layer_controller
   import inference_pkg::*;
-(
+#(
+  parameter int unsigned WBUF_DEPTH = 16384
+) (
   input  logic clk,
   input  logic rst_n,
 
@@ -38,7 +40,7 @@ module layer_controller
   // Weight buffer interface
   output logic                             wbuf_rd_en,
   output logic                             wbuf_rd_bank,
-  output logic [$clog2(4096)-1:0]          wbuf_rd_addr,
+  output logic [$clog2(WBUF_DEPTH)-1:0]    wbuf_rd_addr,
   input  logic [ARRAY_COLS*DATA_WIDTH-1:0] wbuf_rd_data,
 
   // Activation buffer interface
@@ -289,8 +291,8 @@ module layer_controller
     wbuf_rd_addr = cur_weight_base +
                    (m_tile >> $clog2(ARRAY_COLS)) * (ceil_div(cur_input_dim, ARRAY_ROWS[15:0]) << $clog2(ARRAY_ROWS)) +
                    (k_tile >> $clog2(ARRAY_ROWS)) * ARRAY_ROWS +
-                   ((state_q == S_CLEAR_ACC) ? {$clog2(4096){1'b0}} :
-                    stream_cnt[$clog2(4096)-1:0] + 1);
+                   ((state_q == S_CLEAR_ACC) ? {$clog2(WBUF_DEPTH){1'b0}} :
+                    stream_cnt[$clog2(WBUF_DEPTH)-1:0] + 1);
   end
 
   // Activation buffer: read during STREAM phase (with 1-cycle prefetch)
