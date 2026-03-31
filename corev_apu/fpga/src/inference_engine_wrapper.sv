@@ -117,7 +117,7 @@ module inference_engine_wrapper #(
 
   // External buffer write ports
   logic                             ext_wbuf_wr_en;
-  logic [$clog2(4096)-1:0]         ext_wbuf_wr_addr;
+  logic [$clog2(WBUF_DEPTH)-1:0]  ext_wbuf_wr_addr;
   logic [ARRAY_COLS*DATA_WIDTH-1:0] ext_wbuf_wr_data;
 
   logic                             ext_abuf_wr_en;
