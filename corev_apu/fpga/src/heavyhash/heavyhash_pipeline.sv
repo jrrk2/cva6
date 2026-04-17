@@ -3,16 +3,20 @@
 // Orchestrates: nonce patch -> 1st Keccak -> matrix multiply -> 2nd Keccak -> compare
 // Auto-increments nonce on each hash, stops when target met or halted.
 //
-// Timing per hash (single Keccak core, reused, 100 MHz mining clock):
+// Timing per hash (single Keccak core, reused, 125 MHz mining clock):
 //   1st hash: 26 cycles (absorb + 24 rounds + squeeze)
 //   Matrix:   67 cycles (64 rows + 3-stage pipeline)
 //   2nd hash: 26 cycles
 //   Compare:   1 cycle
-//   Total:   ~121 cycles per nonce (~1210 ns at 100 MHz)
+//   Total:   ~121 cycles per nonce (~968 ns at 125 MHz)
+//   With 4 lanes: ~4.13 MH/s theoretical
 
 module heavyhash_pipeline
   import keccak_pkg::*,
          heavyhash_pkg::*;
+#(
+  parameter int unsigned NONCE_STEP = 1
+)
 (
   input  logic          clk,
   input  logic          rst_n,
@@ -239,7 +243,7 @@ module heavyhash_pipeline
             running <= 1'b0;
           end else begin
             // Increment nonce and continue
-            nonce_reg <= nonce_reg + 64'd1;
+            nonce_reg <= nonce_reg + 64'(NONCE_STEP);
             pstate    <= P_HASH1;
           end
         end

@@ -1,7 +1,7 @@
 // heavyhash_top.sv — AXI-Lite register file + HeavyHash pipeline
 //
 // The register file operates on the SoC clock (clk, 50 MHz).
-// The mining pipeline operates on a fast clock (hh_clk, 100 MHz).
+// The mining pipeline operates on a fast clock (hh_clk, 125 MHz).
 // CDC synchronizers bridge the two domains.
 //
 // CDC strategy:
@@ -259,9 +259,11 @@ module heavyhash_top
   end
 
   // ================================================================
-  //  Pipeline instantiation (100 MHz domain)
+  //  Multi-lane pipeline instantiation (125 MHz domain, 4 lanes)
   // ================================================================
-  heavyhash_pipeline u_pipeline (
+  heavyhash_multi #(
+    .NUM_LANES ( 4 )
+  ) u_multi (
     .clk         ( hh_clk            ),
     .rst_n       ( rst_100_n         ),
     .start       ( start_100         ),
