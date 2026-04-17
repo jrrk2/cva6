@@ -13,6 +13,7 @@ module heavyhash_wrapper #(
   parameter bit          HAS_DMA        = 1'b0
 ) (
   input  logic clk,
+  input  logic hh_clk,   // 100 MHz mining clock
   input  logic rst_n,
 
   // AXI-Lite slave (64-bit data, from timeout wrapper)
@@ -120,6 +121,7 @@ module heavyhash_wrapper #(
   // ================================================================
   heavyhash_top u_hh (
     .clk              (clk),
+    .hh_clk           (hh_clk),
     .rst_n            (rst_n),
     .s_axi_awaddr     (core_awaddr),
     .s_axi_awvalid    (core_awvalid),

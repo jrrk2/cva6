@@ -1,26 +1,26 @@
 // heavyhash_top.sv — AXI-Lite register file + HeavyHash pipeline
 //
-// Drop-in replacement for inference_engine_top.
-// Same 32-bit AXI-Lite slave interface, same IRQ output.
+// The register file operates on the SoC clock (clk, 50 MHz).
+// The mining pipeline operates on a fast clock (hh_clk, 100 MHz).
+// CDC synchronizers bridge the two domains.
 //
-// Software flow:
-//   1. Write MID_STATE_1, MID_STATE_2 (pre-computed cSHAKE prefix states)
-//   2. Write MSG_BLOCK (pre-padded 136-byte message template with cSHAKE padding)
-//   3. Write MATRIX rows (64 x 256-bit rows via staging registers)
-//   4. Write TARGET (256-bit difficulty threshold)
-//   5. Write NONCE_LO/HI (starting nonce)
-//   6. Write CTRL[0]=1 to start mining
-//   7. Poll STATUS or wait for IRQ
-//   8. Read FOUND_NONCE_LO/HI and HASH_CNT
+// CDC strategy:
+//   - Config registers (mid-states, msg_block, target, nonce): quasi-static,
+//     written before start and stable during mining. Direct connection is safe.
+//   - Control pulses (start, stop, mat_wr): toggle-based pulse synchronizers.
+//   - Status levels (busy, found): 2FF synchronizers.
+//   - Result data (nonce_found, hash_count): quasi-static when read,
+//     latched on found edge in 50 MHz domain.
 
 module heavyhash_top
   import keccak_pkg::*,
          heavyhash_pkg::*;
 (
-  input  logic        clk,
+  input  logic        clk,       // 50 MHz SoC clock
+  input  logic        hh_clk,    // 100 MHz mining clock
   input  logic        rst_n,
 
-  // 32-bit AXI-Lite slave
+  // 32-bit AXI-Lite slave (50 MHz domain)
   input  logic [11:0] s_axi_awaddr,
   input  logic        s_axi_awvalid,
   output logic        s_axi_awready,
@@ -50,7 +50,7 @@ module heavyhash_top
 );
 
   // ================================================================
-  //  Register storage
+  //  Register storage (50 MHz domain)
   // ================================================================
   // Control
   logic        ctrl_start, ctrl_stop;
@@ -68,16 +68,6 @@ module heavyhash_top
   logic [5:0]   mat_stage_addr;
   logic [255:0] mat_stage_data;
   logic         mat_stage_wr;
-
-  // Pipeline outputs
-  logic         pipe_busy, pipe_found;
-  logic [63:0]  pipe_nonce_found;
-  logic [63:0]  pipe_hash_count;
-
-  // IRQ
-  logic         found_latched;
-  assign irq_done = found_latched;
-  assign busy     = pipe_busy;
 
   // Matrix write mux: staging register or external DMA
   logic         mat_wr_en;
@@ -97,29 +87,201 @@ module heavyhash_top
   end
 
   // ================================================================
-  //  Pipeline instantiation
+  //  100 MHz reset synchronizer (async assert, sync deassert)
+  // ================================================================
+  logic rst_100_s1, rst_100_n;
+
+  always_ff @(posedge hh_clk or negedge rst_n) begin
+    if (!rst_n) begin
+      rst_100_s1 <= 1'b0;
+      rst_100_n  <= 1'b0;
+    end else begin
+      rst_100_s1 <= 1'b1;
+      rst_100_n  <= rst_100_s1;
+    end
+  end
+
+  // ================================================================
+  //  CDC: Pulse synchronizers (50 MHz → 100 MHz)
+  //  Toggle in source domain, 2FF sync + edge-detect in destination.
+  // ================================================================
+
+  // --- Start pulse ---
+  logic start_toggle_50;
+  logic start_sync1, start_sync2, start_sync3;
+  logic start_100;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)
+      start_toggle_50 <= 1'b0;
+    else if (ctrl_start)
+      start_toggle_50 <= ~start_toggle_50;
+  end
+
+  always_ff @(posedge hh_clk or negedge rst_100_n) begin
+    if (!rst_100_n) begin
+      start_sync1 <= 1'b0;
+      start_sync2 <= 1'b0;
+      start_sync3 <= 1'b0;
+    end else begin
+      start_sync1 <= start_toggle_50;
+      start_sync2 <= start_sync1;
+      start_sync3 <= start_sync2;
+    end
+  end
+
+  assign start_100 = start_sync2 ^ start_sync3;
+
+  // --- Stop pulse ---
+  logic stop_toggle_50;
+  logic stop_sync1, stop_sync2, stop_sync3;
+  logic stop_100;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)
+      stop_toggle_50 <= 1'b0;
+    else if (ctrl_stop)
+      stop_toggle_50 <= ~stop_toggle_50;
+  end
+
+  always_ff @(posedge hh_clk or negedge rst_100_n) begin
+    if (!rst_100_n) begin
+      stop_sync1 <= 1'b0;
+      stop_sync2 <= 1'b0;
+      stop_sync3 <= 1'b0;
+    end else begin
+      stop_sync1 <= stop_toggle_50;
+      stop_sync2 <= stop_sync1;
+      stop_sync3 <= stop_sync2;
+    end
+  end
+
+  assign stop_100 = stop_sync2 ^ stop_sync3;
+
+  // --- Matrix write pulse ---
+  logic matwr_toggle_50;
+  logic matwr_sync1, matwr_sync2, matwr_sync3;
+  logic mat_wr_en_100;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)
+      matwr_toggle_50 <= 1'b0;
+    else if (mat_wr_en)
+      matwr_toggle_50 <= ~matwr_toggle_50;
+  end
+
+  always_ff @(posedge hh_clk or negedge rst_100_n) begin
+    if (!rst_100_n) begin
+      matwr_sync1 <= 1'b0;
+      matwr_sync2 <= 1'b0;
+      matwr_sync3 <= 1'b0;
+    end else begin
+      matwr_sync1 <= matwr_toggle_50;
+      matwr_sync2 <= matwr_sync1;
+      matwr_sync3 <= matwr_sync2;
+    end
+  end
+
+  assign mat_wr_en_100 = matwr_sync2 ^ matwr_sync3;
+
+  // Latch matrix write addr/data in 100 MHz domain
+  // (stable for many cycles around the write pulse)
+  logic [5:0]   mat_wr_addr_100;
+  logic [255:0] mat_wr_data_100;
+
+  always_ff @(posedge hh_clk) begin
+    mat_wr_addr_100 <= mat_wr_addr;
+    mat_wr_data_100 <= mat_wr_data;
+  end
+
+  // ================================================================
+  //  CDC: Level synchronizers (100 MHz → 50 MHz)
+  // ================================================================
+
+  // Pipeline outputs (100 MHz domain)
+  logic         pipe_busy, pipe_found;
+  logic [63:0]  pipe_nonce_found;
+  logic [63:0]  pipe_hash_count;
+
+  // --- Busy level ---
+  logic busy_sync1, busy_sync2;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      busy_sync1 <= 1'b0;
+      busy_sync2 <= 1'b0;
+    end else begin
+      busy_sync1 <= pipe_busy;
+      busy_sync2 <= busy_sync1;
+    end
+  end
+
+  // --- Found level ---
+  logic found_sync1, found_sync2;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      found_sync1 <= 1'b0;
+      found_sync2 <= 1'b0;
+    end else begin
+      found_sync1 <= pipe_found;
+      found_sync2 <= found_sync1;
+    end
+  end
+
+  // IRQ & status
+  logic found_latched;
+  assign irq_done = found_latched;
+  assign busy     = busy_sync2;
+
+  // Capture result data on rising edge of found_sync2
+  logic found_prev;
+  logic [63:0] nonce_found_latched;
+  logic [63:0] hash_count_latched;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      found_prev         <= 1'b0;
+      nonce_found_latched<= '0;
+      hash_count_latched <= '0;
+    end else begin
+      found_prev <= found_sync2;
+
+      // Latch nonce on rising edge of found
+      if (found_sync2 && !found_prev)
+        nonce_found_latched <= pipe_nonce_found;
+
+      // Continuously sample hash_count when busy (for status display)
+      // Cosmetic glitches on multi-bit CDC are acceptable here
+      if (busy_sync2)
+        hash_count_latched <= pipe_hash_count;
+    end
+  end
+
+  // ================================================================
+  //  Pipeline instantiation (100 MHz domain)
   // ================================================================
   heavyhash_pipeline u_pipeline (
-    .clk         ( clk              ),
-    .rst_n       ( rst_n            ),
-    .start       ( ctrl_start       ),
-    .stop        ( ctrl_stop        ),
-    .busy        ( pipe_busy        ),
-    .found       ( pipe_found       ),
-    .mid_state_1 ( mid_state_1      ),
-    .mid_state_2 ( mid_state_2      ),
-    .msg_block   ( msg_block        ),
-    .target      ( target           ),
-    .nonce_start ( nonce_start      ),
-    .nonce_found ( pipe_nonce_found ),
-    .hash_count  ( pipe_hash_count  ),
-    .mat_wr_en   ( mat_wr_en        ),
-    .mat_wr_addr ( mat_wr_addr      ),
-    .mat_wr_data ( mat_wr_data      )
+    .clk         ( hh_clk            ),
+    .rst_n       ( rst_100_n         ),
+    .start       ( start_100         ),
+    .stop        ( stop_100          ),
+    .busy        ( pipe_busy         ),
+    .found       ( pipe_found        ),
+    .mid_state_1 ( mid_state_1       ),  // quasi-static, stable during mining
+    .mid_state_2 ( mid_state_2       ),
+    .msg_block   ( msg_block         ),
+    .target      ( target            ),
+    .nonce_start ( nonce_start       ),
+    .nonce_found ( pipe_nonce_found  ),
+    .hash_count  ( pipe_hash_count   ),
+    .mat_wr_en   ( mat_wr_en_100     ),
+    .mat_wr_addr ( mat_wr_addr_100   ),
+    .mat_wr_data ( mat_wr_data_100   )
   );
 
   // ================================================================
-  //  AXI-Lite write channel
+  //  AXI-Lite write channel (50 MHz domain)
   // ================================================================
   logic        aw_fire, w_fire;
   logic [11:0] wr_addr;
@@ -185,8 +347,8 @@ module heavyhash_top
       ctrl_stop    <= 1'b0;
       mat_stage_wr <= 1'b0;
 
-      // Latch found from pipeline
-      if (pipe_found)
+      // Latch found from pipeline (via synchronized signal)
+      if (found_sync2 && !found_prev)
         found_latched <= 1'b1;
 
       if (w_fire) begin
@@ -227,7 +389,7 @@ module heavyhash_top
   end
 
   // ================================================================
-  //  AXI-Lite read channel
+  //  AXI-Lite read channel (50 MHz domain)
   // ================================================================
   logic rd_pending;
   logic [31:0] rd_data;
@@ -246,13 +408,13 @@ module heavyhash_top
         rd_pending <= 1'b1;
         case (s_axi_araddr)
           REG_CTRL:           rd_data <= '0;
-          REG_STATUS:         rd_data <= {30'd0, found_latched, pipe_busy};
-          REG_HASH_CNT_LO:   rd_data <= pipe_hash_count[31:0];
-          REG_HASH_CNT_HI:   rd_data <= pipe_hash_count[63:32];
+          REG_STATUS:         rd_data <= {30'd0, found_latched, busy_sync2};
+          REG_HASH_CNT_LO:   rd_data <= hash_count_latched[31:0];
+          REG_HASH_CNT_HI:   rd_data <= hash_count_latched[63:32];
           REG_NONCE_LO:       rd_data <= nonce_start[31:0];
           REG_NONCE_HI:       rd_data <= nonce_start[63:32];
-          REG_FOUND_NONCE_LO: rd_data <= pipe_nonce_found[31:0];
-          REG_FOUND_NONCE_HI: rd_data <= pipe_nonce_found[63:32];
+          REG_FOUND_NONCE_LO: rd_data <= nonce_found_latched[31:0];
+          REG_FOUND_NONCE_HI: rd_data <= nonce_found_latched[63:32];
           default:             rd_data <= 32'hDEAD_BEEF;
         endcase
       end else if (s_axi_rready && rd_pending) begin

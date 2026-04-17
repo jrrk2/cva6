@@ -276,6 +276,7 @@ logic timer_irq;
 logic ipi;
 
 logic clk;
+logic hh_clk;    // 100 MHz mining clock for HeavyHash
 logic eth_clk;
 logic spi_clk_i;
 logic phy_tx_clk;
@@ -1250,8 +1251,9 @@ heavyhash_wrapper #(
     .AXI_DATA_WIDTH ( 64   ),
     .HAS_DMA        ( 1'b1 )
 ) i_heavyhash (
-    .clk   ( clk        ),
-    .rst_n ( ndmreset_n ),
+    .clk    ( clk        ),
+    .hh_clk ( hh_clk     ),
+    .rst_n  ( ndmreset_n ),
     // AXI-Lite slave (from timeout wrapper, truncate address to 12 bits)
     .s_axi_awaddr  ( ie_to_awaddr[11:0] ),
     .s_axi_awvalid ( ie_to_awvalid      ),
@@ -1719,6 +1721,7 @@ xlnx_clk_gen i_xlnx_clk_gen (
   .clk_out2 ( phy_tx_clk    ), // 125 MHz (for RGMII PHY)
   .clk_out3 ( eth_clk       ), // 125 MHz quadrature (90 deg phase shift)
   .clk_out4 ( sd_clk_sys    ), // 50 MHz clock
+  .clk_out5 ( hh_clk        ), // 100 MHz HeavyHash mining clock
   .reset    ( cpu_reset     ),
   .locked   ( pll_locked    ),
   .clk_in1  ( ddr_clock_out )

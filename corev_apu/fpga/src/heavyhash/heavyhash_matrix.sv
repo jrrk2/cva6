@@ -9,10 +9,11 @@
 //
 // Final output: XOR result nibbles with input hash
 //
-// PIPELINING: The dot product is split into 4 partial sums of 16 products
-// each (combinational), registered, then combined in the following cycle.
-// This breaks the critical path from ~42 ns to ~12 ns, fixing timing at 50 MHz.
-// Throughput remains 1 row/cycle after a 1-cycle pipeline fill.
+// PIPELINING (3-stage, for 100 MHz / 10 ns timing):
+//   Stage 1: 8 sub-partial sums of 8 products each (combinational, ~6-7 ns)
+//   Stage 2: Combine pairs into 4 partial sums (registered + combinational, ~3 ns)
+//   Stage 3: Final sum of 4 partial sums (registered + combinational, ~4 ns)
+// Throughput: 1 row/cycle after 2-cycle pipeline fill.
 
 module heavyhash_matrix
   import keccak_pkg::*,
@@ -59,47 +60,93 @@ module heavyhash_matrix
   end
 
   // ----------------------------------------------------------------
-  //  Pipelined dot product
+  //  3-stage pipelined dot product
   //
-  //  Stage 1 (combinational): Compute 4 partial sums of 16 products each.
-  //  Stage 2 (registered):    Sum the 4 partial sums → final dot product.
+  //  Stage 1 (combinational): 8 sub-partial sums of 8 products each.
+  //    Each sub-sum: max = 8 * 15 * 15 = 1800, fits in 11 bits.
   //
-  //  Each partial sum: max = 16 * 15 * 15 = 3600, fits in 12 bits.
-  //  Final sum: max = 64 * 225 = 14400, fits in ACCUM_W = 14 bits.
+  //  Stage 2 (registered + combinational): Combine pairs → 4 partial sums.
+  //    Each partial sum: max = 3600, fits in 12 bits.
+  //
+  //  Stage 3 (registered + combinational): Final sum of 4 partial sums.
+  //    Final sum: max = 64 * 225 = 14400, fits in ACCUM_W = 14 bits.
   // ----------------------------------------------------------------
 
-  // Stage 1: four 16-element partial sums (combinational)
+  // Stage 1: 8 sub-partial sums of 8 products each (combinational)
+  logic [10:0] spsum0, spsum1, spsum2, spsum3;
+  logic [10:0] spsum4, spsum5, spsum6, spsum7;
+
+  always_comb begin
+    spsum0 = '0;
+    for (int j = 0; j < 8; j++)
+      spsum0 = spsum0 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
+  end
+
+  always_comb begin
+    spsum1 = '0;
+    for (int j = 8; j < 16; j++)
+      spsum1 = spsum1 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
+  end
+
+  always_comb begin
+    spsum2 = '0;
+    for (int j = 16; j < 24; j++)
+      spsum2 = spsum2 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
+  end
+
+  always_comb begin
+    spsum3 = '0;
+    for (int j = 24; j < 32; j++)
+      spsum3 = spsum3 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
+  end
+
+  always_comb begin
+    spsum4 = '0;
+    for (int j = 32; j < 40; j++)
+      spsum4 = spsum4 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
+  end
+
+  always_comb begin
+    spsum5 = '0;
+    for (int j = 40; j < 48; j++)
+      spsum5 = spsum5 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
+  end
+
+  always_comb begin
+    spsum6 = '0;
+    for (int j = 48; j < 56; j++)
+      spsum6 = spsum6 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
+  end
+
+  always_comb begin
+    spsum7 = '0;
+    for (int j = 56; j < 64; j++)
+      spsum7 = spsum7 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
+  end
+
+  // Register stage 1 outputs
+  logic [10:0] spsum0_r, spsum1_r, spsum2_r, spsum3_r;
+  logic [10:0] spsum4_r, spsum5_r, spsum6_r, spsum7_r;
+
+  always_ff @(posedge clk) begin
+    spsum0_r <= spsum0;
+    spsum1_r <= spsum1;
+    spsum2_r <= spsum2;
+    spsum3_r <= spsum3;
+    spsum4_r <= spsum4;
+    spsum5_r <= spsum5;
+    spsum6_r <= spsum6;
+    spsum7_r <= spsum7;
+  end
+
+  // Stage 2: combine pairs into 4 partial sums (combinational)
   logic [11:0] psum0, psum1, psum2, psum3;
+  assign psum0 = {1'b0, spsum0_r} + {1'b0, spsum1_r};
+  assign psum1 = {1'b0, spsum2_r} + {1'b0, spsum3_r};
+  assign psum2 = {1'b0, spsum4_r} + {1'b0, spsum5_r};
+  assign psum3 = {1'b0, spsum6_r} + {1'b0, spsum7_r};
 
-  always_comb begin
-    psum0 = '0;
-    for (int j = 0; j < 16; j++) begin
-      psum0 = psum0 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-    end
-  end
-
-  always_comb begin
-    psum1 = '0;
-    for (int j = 16; j < 32; j++) begin
-      psum1 = psum1 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-    end
-  end
-
-  always_comb begin
-    psum2 = '0;
-    for (int j = 32; j < 48; j++) begin
-      psum2 = psum2 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-    end
-  end
-
-  always_comb begin
-    psum3 = '0;
-    for (int j = 48; j < 64; j++) begin
-      psum3 = psum3 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-    end
-  end
-
-  // Register the partial sums
+  // Register stage 2 outputs
   logic [11:0] psum0_r, psum1_r, psum2_r, psum3_r;
 
   always_ff @(posedge clk) begin
@@ -109,7 +156,7 @@ module heavyhash_matrix
     psum3_r <= psum3;
   end
 
-  // Stage 2: final sum (combinational, just 3 additions — very fast)
+  // Stage 3: final sum (combinational, just 3 additions — very fast)
   logic [ACCUM_W-1:0] dot;
   assign dot = {2'b0, psum0_r} + {2'b0, psum1_r}
              + {2'b0, psum2_r} + {2'b0, psum3_r};
@@ -122,20 +169,19 @@ module heavyhash_matrix
   //
   //  Pipeline timing (after start):
   //    Cycle 0: row_cnt=0 → BRAM read initiated
-  //    Cycle 1: mat_row = row 0 data → partial sums computed (comb)
-  //    Cycle 2: psum*_r registered → dot valid for row 0
-  //             Also: mat_row = row 1 data → partial sums for row 1
-  //    Cycle 3: store result_nibbles[0], dot valid for row 1
-  //    ...
-  //    Cycle N+2: store result_nibbles[N], dot valid for row N+1
-  //    Cycle 65: store result_nibbles[63], done
+  //    Cycle 1: mat_row = row 0 data → sub-partial sums computed (comb)
+  //    Cycle 2: sub-psums registered → partial sums computed (comb)
+  //    Cycle 3: partial sums registered → dot valid for row 0
+  //    Cycle N+3: dot valid for row N → store
+  //    Cycle 66: store result_nibbles[63], done
   //
   //  We use a 'pipe_cnt' that counts from 0 to 66:
   //    pipe_cnt 0:     start → read row 0
-  //    pipe_cnt 1:     read row 1, partial sums for row 0
-  //    pipe_cnt 2:     read row 2, partial sums for row 1, dot valid for row 0 → store
-  //    pipe_cnt N+2:   dot valid for row N → store
-  //    pipe_cnt 65:    dot valid for row 63 → store, signal done
+  //    pipe_cnt 1:     read row 1, sub-psums for row 0
+  //    pipe_cnt 2:     read row 2, psums for row 0, sub-psums for row 1
+  //    pipe_cnt 3:     dot valid for row 0 → store
+  //    pipe_cnt N+3:   dot valid for row N → store
+  //    pipe_cnt 66:    dot valid for row 63 → store, signal done
   // ----------------------------------------------------------------
   logic [6:0]   pipe_cnt;
   logic         running;
@@ -161,12 +207,12 @@ module heavyhash_matrix
         running  <= 1'b1;
         pipe_cnt <= 7'd0;
       end else if (running) begin
-        // Store result nibble when dot is valid (pipe_cnt >= 2)
-        if (pipe_cnt >= 7'd2)
-          result_nibbles[pipe_cnt - 7'd2] <= dot_nibble;
+        // Store result nibble when dot is valid (pipe_cnt >= 3)
+        if (pipe_cnt >= 7'd3)
+          result_nibbles[pipe_cnt - 7'd3] <= dot_nibble;
 
-        if (pipe_cnt == 7'd65) begin
-          // All 64 results stored (rows 0-63 at pipe_cnt 2-65)
+        if (pipe_cnt == 7'd66) begin
+          // All 64 results stored (rows 0-63 at pipe_cnt 3-66)
           running <= 1'b0;
           done    <= 1'b1;
           pipe_cnt <= '0;

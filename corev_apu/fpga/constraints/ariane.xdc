@@ -39,6 +39,12 @@ set_property IOB TRUE [get_ports {prog_d[*]}]
 set_property IOB TRUE [get_ports prog_rxen]
 set_property IOB TRUE [get_ports prog_txen]
 
+# HeavyHash CDC constraints (50 MHz <-> 100 MHz mining clock)
+# Both clocks come from the same MMCM, so Vivado knows they're related.
+# Use set_max_delay -datapath_only for the CDC synchronizer paths.
+set_max_delay -datapath_only -from [get_clocks clk_out1_xlnx_clk_gen] -to [get_clocks clk_out5_xlnx_clk_gen] 10.0
+set_max_delay -datapath_only -from [get_clocks clk_out5_xlnx_clk_gen] -to [get_clocks clk_out1_xlnx_clk_gen] 10.0
+
 set_property DONT_TOUCH true [get_cells i_cva6_rvfi]
 set_property DONT_TOUCH true [get_cells i_iti]
 set_property DONT_TOUCH true [get_cells i_encapsulator]
