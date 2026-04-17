@@ -1245,13 +1245,11 @@ logic [63:0] ie_dma_rdata;
 logic [1:0]  ie_dma_rresp;
 logic        ie_dma_rlast, ie_dma_rvalid, ie_dma_rready;
 
-inference_engine_wrapper #(
-    .AXI_ADDR_WIDTH ( 12    ),
-    .AXI_DATA_WIDTH ( 64    ),
-    .HAS_DMA        ( 1'b1  ),
-    .DATA_WIDTH     ( 16    ),
-    .WBUF_DEPTH     ( 16384 )
-) i_inference_engine (
+heavyhash_wrapper #(
+    .AXI_ADDR_WIDTH ( 12   ),
+    .AXI_DATA_WIDTH ( 64   ),
+    .HAS_DMA        ( 1'b1 )
+) i_heavyhash (
     .clk   ( clk        ),
     .rst_n ( ndmreset_n ),
     // AXI-Lite slave (from timeout wrapper, truncate address to 12 bits)
@@ -1272,7 +1270,7 @@ inference_engine_wrapper #(
     .s_axi_rresp   ( ie_to_rresp        ),
     .s_axi_rvalid  ( ie_to_rvalid       ),
     .s_axi_rready  ( ie_to_rready       ),
-    // DMA master (Phase 2)
+    // DMA master (loads mining matrix from DRAM)
     .m_axi_araddr  ( ie_dma_araddr  ),
     .m_axi_arlen   ( ie_dma_arlen   ),
     .m_axi_arsize  ( ie_dma_arsize  ),
