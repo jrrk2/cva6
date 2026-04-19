@@ -1,15 +1,16 @@
-// heavyhash_pipeline.sv — Full HeavyHash mining pipeline
+// heavyhash_pipeline.sv — Pipelined HeavyHash mining pipeline
 //
-// Orchestrates: nonce patch -> 1st Keccak -> matrix multiply -> 2nd Keccak -> compare
-// Auto-increments nonce on each hash, stops when target met or halted.
+// Three-stage pipeline with valid/ready handshake between stages:
+//   Stage 1: First Keccak hash (dedicated keccak256 instance)
+//   Stage 2: Matrix multiply (64x64 4-bit matrix-vector, dual-port 2 rows/cyc)
+//   Stage 3: Second Keccak hash + target comparison (dedicated keccak256)
 //
-// Timing per hash (single Keccak core, reused, 100 MHz mining clock):
-//   1st hash: 27 cycles (1 pipeline + absorb + 24 rounds + squeeze)
-//   Matrix:   67 cycles (64 rows + 3-stage pipeline)
-//   2nd hash: 27 cycles
-//   Compare:   2 cycles (1 wait + 1 registered check)
-//   Total:   ~124 cycles per nonce
-//   With 16 lanes at 125 MHz: ~16.1 MH/s theoretical
+// Each stage has a 1-deep output holding register.  Throughput is
+// limited by the slowest stage (matrix at ~35 cycles with dual-port
+// BRAM), giving ~3.57 MH/s per lane at 125 MHz.
+//
+// Resource cost vs non-pipelined: one additional keccak256 instance
+// per lane (the keccak core is no longer shared between hash passes).
 
 module heavyhash_pipeline
   import keccak_pkg::*,
@@ -27,7 +28,7 @@ module heavyhash_pipeline
   output logic          busy,
   output logic          found,       // target met
 
-  // Configuration (active during mining)
+  // Configuration (stable during mining)
   input  logic [1599:0] mid_state_1, // cSHAKE prefix state for 1st hash
   input  logic [1599:0] mid_state_2, // cSHAKE prefix state for 2nd hash
   input  logic [RATE-1:0] msg_block, // pre-padded message template
@@ -38,171 +39,249 @@ module heavyhash_pipeline
   output logic [63:0]   nonce_found, // winning nonce
   output logic [63:0]   hash_count,  // total hashes computed
 
-  // Matrix BRAM write port (directly exposed)
+  // Matrix BRAM write port
   input  logic          mat_wr_en,
   input  logic [5:0]    mat_wr_addr,
   input  logic [255:0]  mat_wr_data
 );
 
   // ================================================================
-  //  Internal state — one-hot FSM
-  //
-  //  One-hot encoding ensures `found` is a single FF output with
-  //  no combinational decode.  This eliminates glitches that could
-  //  be captured by the CDC synchronizer in heavyhash_top.
+  //  Top-level state
   // ================================================================
-  localparam int PS_IDLE    = 0;
-  localparam int PS_HASH1   = 1;
-  localparam int PS_MATRIX  = 2;
-  localparam int PS_HASH2   = 3;
-  localparam int PS_COMPARE = 4;
-  localparam int PS_FOUND   = 5;
-  localparam int PS_COUNT   = 6;
-
-  logic [PS_COUNT-1:0] ps;
-
-  logic [63:0] nonce_reg;
+  logic        running;
+  logic        found_reg;      // single FF, glitch-free for CDC
+  logic [63:0] nonce_found_reg;
   logic [63:0] hash_cnt;
-  logic [255:0] first_hash;    // result of 1st Keccak
-  logic [255:0] matrix_result; // after matrix XOR
-  logic running;
 
   assign busy       = running;
-  assign found      = ps[PS_FOUND];   // single FF, glitch-free
-  assign nonce_found= nonce_reg;
+  assign found      = found_reg;
+  assign nonce_found = nonce_found_reg;
   assign hash_count = hash_cnt;
 
   // ================================================================
-  //  Keccak core (shared between 1st and 2nd hash)
+  //  Stage 1: First Keccak hash
   // ================================================================
-  logic [1599:0]  keccak_mid;
-  logic [RATE-1:0] keccak_block;
-  logic           keccak_valid;
-  logic           keccak_ready;
-  logic [255:0]   keccak_hash;
-  logic           keccak_done;
 
-  // Pipeline registers to break high-fanout FSM→Keccak routing.
-  // ps[PS_HASHx] fans out to 1600+1088 bit muxes; registering the
-  // mux outputs lets the router place them near the Keccak, cutting
-  // the critical 10 ns cross-die route in half.
-  logic [1599:0]   keccak_mid_r;
-  logic [RATE-1:0] keccak_block_r;
-  logic            keccak_valid_r;
+  // Nonce management
+  logic [63:0] s1_next_nonce;   // next nonce to issue to keccak1
+  logic [63:0] s1_nonce;        // nonce currently in keccak1
+  logic        s1_started;      // keccak1 is running for this nonce
+
+  // Output holding register (1-deep FIFO to stage 2)
+  logic         s1_valid;
+  logic [63:0]  s1_nonce_out;
+  logic [255:0] s1_hash_out;
+  logic         s1_ready;       // set by stage 2
+
+  // Keccak1 instance
+  logic         k1_ready;
+  logic [255:0] k1_hash;
+  logic         k1_done;
+
+  // Build message block with current nonce patched in
+  logic [RATE-1:0] msg_with_nonce;
+  always_comb begin
+    msg_with_nonce = msg_block;
+    msg_with_nonce[NONCE_BIT_OFS +: 64] = s1_next_nonce;
+  end
+
+  // Fire keccak1 when: running, not found, core idle, output slot available
+  logic k1_fire;
+  assign k1_fire = running && !found_reg && !s1_started
+                 && (!s1_valid || s1_ready) && k1_ready;
+
+  // Note: for synthesis, pipeline registers on mid_state_1 and
+  // msg_with_nonce may be needed to break high-fanout routing.
+  // Omitted here for simulation clarity.
+  keccak256 u_keccak1 (
+    .clk       ( clk            ),
+    .rst_n     ( rst_n          ),
+    .mid_state ( mid_state_1    ),
+    .in_block  ( msg_with_nonce ),
+    .in_valid  ( k1_fire        ),
+    .in_ready  ( k1_ready       ),
+    .out_hash  ( k1_hash        ),
+    .out_valid ( k1_done        )
+  );
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      keccak_mid_r   <= '0;
-      keccak_block_r <= '0;
-      keccak_valid_r <= 1'b0;
+      s1_started    <= 1'b0;
+      s1_valid      <= 1'b0;
+      s1_nonce      <= '0;
+      s1_nonce_out  <= '0;
+      s1_hash_out   <= '0;
+      s1_next_nonce <= '0;
     end else begin
-      keccak_mid_r   <= keccak_mid;
-      keccak_block_r <= keccak_block;
-      keccak_valid_r <= keccak_valid;
+      // Consume: stage 2 takes our output
+      if (s1_valid && s1_ready)
+        s1_valid <= 1'b0;
+
+      // Fire: start keccak1 for next nonce
+      if (k1_fire) begin
+        s1_started    <= 1'b1;
+        s1_nonce      <= s1_next_nonce;
+        s1_next_nonce <= s1_next_nonce + 64'(NONCE_STEP);
+      end
+
+      // Done: keccak1 finished, latch result into output register
+      if (k1_done && s1_started) begin
+        s1_started   <= 1'b0;
+        s1_valid     <= 1'b1;
+        s1_nonce_out <= s1_nonce;
+        s1_hash_out  <= k1_hash;
+      end
+
+      // Start: reset stage for new mining session
+      if (start) begin
+        s1_next_nonce <= nonce_start;
+        s1_started    <= 1'b0;
+        s1_valid      <= 1'b0;
+      end
     end
   end
 
-  keccak256 u_keccak (
-    .clk       ( clk            ),
-    .rst_n     ( rst_n          ),
-    .mid_state ( keccak_mid_r   ),
-    .in_block  ( keccak_block_r ),
-    .in_valid  ( keccak_valid_r ),
-    .in_ready  ( keccak_ready   ),
-    .out_hash  ( keccak_hash    ),
-    .out_valid ( keccak_done    )
-  );
+  // ================================================================
+  //  Stage 2: Matrix multiply
+  // ================================================================
 
-  // ================================================================
-  //  Matrix multiply
-  // ================================================================
-  logic         mat_start;
-  logic         mat_busy;
+  logic         mat_start_r;
+  logic         mat_busy_i;
   logic         mat_done;
   logic [255:0] mat_hash_out;
+  logic [255:0] mat_hash_in;    // registered input, stable during operation
+
+  // Output holding register (1-deep FIFO to stage 3)
+  logic         s2_valid;
+  logic [63:0]  s2_nonce_out;
+  logic [255:0] s2_result_out;
+  logic         s2_ready;       // set by stage 3
+
+  logic [63:0]  s2_nonce;       // nonce being processed by matrix
+
+  // Accept from stage 1 when: matrix idle AND output slot available
+  assign s1_ready = !mat_busy_i && (!s2_valid || s2_ready);
 
   heavyhash_matrix u_matrix (
     .clk        ( clk          ),
     .rst_n      ( rst_n        ),
-    .mat_wr_en  ( mat_wr_en   ),
-    .mat_wr_addr( mat_wr_addr ),
-    .mat_wr_data( mat_wr_data ),
-    .hash_in    ( first_hash   ),
-    .start      ( mat_start    ),
-    .busy       ( mat_busy     ),
+    .mat_wr_en  ( mat_wr_en    ),
+    .mat_wr_addr( mat_wr_addr  ),
+    .mat_wr_data( mat_wr_data  ),
+    .hash_in    ( mat_hash_in  ),
+    .start      ( mat_start_r  ),
+    .busy       ( mat_busy_i   ),
     .done       ( mat_done     ),
     .hash_out   ( mat_hash_out )
   );
 
-  // ================================================================
-  //  Build message block with current nonce patched in
-  // ================================================================
-  logic [RATE-1:0] msg_with_nonce;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      mat_start_r   <= 1'b0;
+      s2_valid      <= 1'b0;
+      s2_nonce      <= '0;
+      s2_nonce_out  <= '0;
+      s2_result_out <= '0;
+      mat_hash_in   <= '0;
+    end else begin
+      mat_start_r <= 1'b0;   // default: single-cycle pulse
 
-  always_comb begin
-    msg_with_nonce = msg_block;
-    // Patch nonce at bytes 72-79 (bits 576-639)
-    msg_with_nonce[NONCE_BIT_OFS +: 64] = nonce_reg;
+      // Consume: stage 3 takes our output
+      if (s2_valid && s2_ready)
+        s2_valid <= 1'b0;
+
+      // Accept from stage 1: latch hash and start matrix
+      if (s1_valid && s1_ready) begin
+        mat_hash_in <= s1_hash_out;
+        mat_start_r <= 1'b1;
+        s2_nonce    <= s1_nonce_out;
+      end
+
+      // Matrix done: latch result into output register
+      if (mat_done) begin
+        s2_valid      <= 1'b1;
+        s2_nonce_out  <= s2_nonce;
+        s2_result_out <= mat_hash_out;
+      end
+
+      // Start: reset stage
+      if (start) begin
+        s2_valid    <= 1'b0;
+        mat_start_r <= 1'b0;
+      end
+    end
   end
 
   // ================================================================
-  //  Build rate block for 2nd hash
-  //  Input to 2nd cSHAKE256: the 32-byte matrix result
-  //  Padded with cSHAKE256 padding: byte[32] |= 0x04, byte[135] |= 0x80
+  //  Stage 3: Second Keccak hash + target comparison
   // ================================================================
-  logic [RATE-1:0] hash2_block;
 
+  logic         k2_ready;
+  logic [255:0] k2_hash;
+  logic         k2_done;
+
+  logic         s3_started;     // keccak2 is running
+  logic [63:0]  s3_nonce;       // nonce being hashed by keccak2
+
+  // Build rate block for 2nd hash from stage 2 output
+  logic [RATE-1:0] hash2_block;
   always_comb begin
     hash2_block = '0;
-    hash2_block[255:0] = matrix_result;
+    hash2_block[255:0] = s2_result_out;
     // cSHAKE padding: 0x04 at byte[32], 0x80 at byte[135]
     hash2_block[32*8 +: 8] = 8'h04;
     hash2_block[135*8 +: 8] = 8'h80;
   end
 
-  // ================================================================
-  //  Keccak mux — select mid-state and input block based on pipeline stage
-  // ================================================================
-  always_comb begin
-    keccak_mid   = '0;
-    keccak_block = '0;
-    keccak_valid = 1'b0;
+  // Accept from stage 2 when: running, not found, keccak2 idle
+  assign s2_ready = running && !found_reg && !s3_started && k2_ready;
 
-    if (ps[PS_HASH1]) begin
-      keccak_mid   = mid_state_1;
-      keccak_block = msg_with_nonce;
-      keccak_valid = keccak_ready;  // fire immediately when ready
-    end else if (ps[PS_HASH2]) begin
-      keccak_mid   = mid_state_2;
-      keccak_block = hash2_block;
-      keccak_valid = keccak_ready;
+  logic k2_fire;
+  assign k2_fire = s2_valid && s2_ready;
+
+  keccak256 u_keccak2 (
+    .clk       ( clk         ),
+    .rst_n     ( rst_n       ),
+    .mid_state ( mid_state_2 ),
+    .in_block  ( hash2_block ),
+    .in_valid  ( k2_fire     ),
+    .in_ready  ( k2_ready    ),
+    .out_hash  ( k2_hash     ),
+    .out_valid ( k2_done     )
+  );
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      s3_started <= 1'b0;
+      s3_nonce   <= '0;
+    end else begin
+      if (k2_fire) begin
+        s3_started <= 1'b1;
+        s3_nonce   <= s2_nonce_out;
+      end
+
+      if (k2_done && s3_started)
+        s3_started <= 1'b0;
+
+      if (start)
+        s3_started <= 1'b0;
     end
   end
 
   // ================================================================
-  //  Explicit word-by-word target comparison (MSB-first)
-  //
-  //  Replaces monolithic `keccak_hash <= target` which Vivado
-  //  mis-synthesizes for 256-bit operands at 125 MHz (carry chain
-  //  too deep for the clock period, producing silent wrong results).
+  //  Target comparison (word-by-word, MSB-first, registered)
   // ================================================================
-  logic [7:0] cmp_lt;  // word[i]: hash < target
-  logic [7:0] cmp_eq;  // word[i]: hash == target
+  logic [7:0] cmp_lt;
+  logic [7:0] cmp_eq;
 
   genvar cw;
   generate
     for (cw = 0; cw < 8; cw++) begin : gen_cmp
-      assign cmp_lt[cw] = (keccak_hash[cw*32 +: 32] < target[cw*32 +: 32]);
-      assign cmp_eq[cw] = (keccak_hash[cw*32 +: 32] == target[cw*32 +: 32]);
+      assign cmp_lt[cw] = (k2_hash[cw*32 +: 32] < target[cw*32 +: 32]);
+      assign cmp_eq[cw] = (k2_hash[cw*32 +: 32] == target[cw*32 +: 32]);
     end
   endgenerate
 
-  // hash <= target  ≡  hash < target  OR  hash == target
-  // MSB word is [7], LSB word is [0].
-  //
-  // Registered to give carry chains a full cycle to settle before
-  // the FSM samples the result.  The FSM uses hash_le_target
-  // (valid one cycle after P_HASH2→P_COMPARE transition).
   logic hash_le_target_comb;
   assign hash_le_target_comb =
       cmp_lt[7]
@@ -222,124 +301,65 @@ module heavyhash_pipeline
       hash_le_target <= hash_le_target_comb;
   end
 
-  // ================================================================
-  //  Pipeline FSM (one-hot)
-  // ================================================================
-  logic hash1_started, hash2_started, cmp_wait;
+  // Comparison result valid one cycle after k2_done (registered compare)
+  logic        cmp_valid;
+  logic [63:0] cmp_nonce;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      ps           <= '0;
-      ps[PS_IDLE]  <= 1'b1;
-      running      <= 1'b0;
-      nonce_reg    <= '0;
-      hash_cnt     <= '0;
-      first_hash   <= '0;
-      matrix_result<= '0;
-      mat_start    <= 1'b0;
-      hash1_started<= 1'b0;
-      hash2_started<= 1'b0;
-      cmp_wait     <= 1'b0;
+      cmp_valid <= 1'b0;
+      cmp_nonce <= '0;
     end else begin
-      mat_start <= 1'b0;
+      cmp_valid <= k2_done && s3_started;
+      if (k2_done && s3_started)
+        cmp_nonce <= s3_nonce;
+      if (start)
+        cmp_valid <= 1'b0;
+    end
+  end
 
-      // ---- IDLE ----
-      if (ps[PS_IDLE]) begin
-        if (start) begin
-          running      <= 1'b1;
-          nonce_reg    <= nonce_start;
-          hash_cnt     <= '0;
-          ps           <= '0;
-          ps[PS_HASH1] <= 1'b1;
-          hash1_started<= 1'b0;
-        end
+  // ================================================================
+  //  Top-level control
+  // ================================================================
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      running         <= 1'b0;
+      found_reg       <= 1'b0;
+      nonce_found_reg <= '0;
+      hash_cnt        <= '0;
+    end else begin
+      if (start) begin
+        running         <= 1'b1;
+        found_reg       <= 1'b0;
+        hash_cnt        <= '0;
+        nonce_found_reg <= '0;
       end
 
-      // ---- HASH1 ----
-      if (ps[PS_HASH1]) begin
-        if (stop) begin
-          ps          <= '0;
-          ps[PS_IDLE] <= 1'b1;
-          running     <= 1'b0;
-        end else begin
-          if (keccak_valid_r && keccak_ready)
-            hash1_started <= 1'b1;
-          if (keccak_done && hash1_started) begin
-            first_hash    <= keccak_hash;
-            mat_start     <= 1'b1;
-            ps            <= '0;
-            ps[PS_MATRIX] <= 1'b1;
-            hash1_started <= 1'b0;
-          end
-        end
+      if (stop) begin
+        running   <= 1'b0;
+        found_reg <= 1'b0;
       end
 
-      // ---- MATRIX ----
-      if (ps[PS_MATRIX]) begin
-        if (stop) begin
-          ps          <= '0;
-          ps[PS_IDLE] <= 1'b1;
-          running     <= 1'b0;
-        end else if (mat_done) begin
-          matrix_result <= mat_hash_out;
-          ps            <= '0;
-          ps[PS_HASH2]  <= 1'b1;
-          hash2_started <= 1'b0;
-        end
-      end
-
-      // ---- HASH2 ----
-      if (ps[PS_HASH2]) begin
-        if (stop) begin
-          ps          <= '0;
-          ps[PS_IDLE] <= 1'b1;
-          running     <= 1'b0;
-        end else begin
-          if (keccak_valid_r && keccak_ready)
-            hash2_started <= 1'b1;
-          if (keccak_done && hash2_started) begin
-            hash_cnt      <= hash_cnt + 64'd1;
-            hash2_started <= 1'b0;
-            ps            <= '0;
-            ps[PS_COMPARE]<= 1'b1;
-          end
-        end
-      end
-
-      // ---- COMPARE ----
-      if (ps[PS_COMPARE]) begin
-        // Wait one cycle for registered comparison to capture the
-        // new keccak_hash result (hash_le_target lags by one cycle).
-        if (!cmp_wait) begin
-          cmp_wait <= 1'b1;
-        end else begin
-          cmp_wait <= 1'b0;
-          if (hash_le_target) begin
-            ps           <= '0;
-            ps[PS_FOUND] <= 1'b1;
-          end else if (stop) begin
-            ps          <= '0;
-            ps[PS_IDLE] <= 1'b1;
-            running     <= 1'b0;
-          end else begin
-            // Increment nonce and continue
-            nonce_reg    <= nonce_reg + 64'(NONCE_STEP);
-            ps           <= '0;
-            ps[PS_HASH1] <= 1'b1;
-          end
-        end
-      end
-
-      // ---- FOUND ----
-      if (ps[PS_FOUND]) begin
-        // Stay here until software reads the result and stops
-        running <= 1'b0;
-        if (stop) begin
-          ps          <= '0;
-          ps[PS_IDLE] <= 1'b1;
+      // Comparison done: count hash and check target
+      if (cmp_valid) begin
+        hash_cnt <= hash_cnt + 64'd1;
+        if (hash_le_target && !found_reg) begin
+          found_reg       <= 1'b1;
+          nonce_found_reg <= cmp_nonce;
+          running         <= 1'b0;
         end
       end
     end
   end
+
+  // ================================================================
+  //  Observability aliases (testbench / ILA)
+  // ================================================================
+  logic [255:0] first_hash;
+  logic [255:0] matrix_result;
+  logic [255:0] keccak_hash;
+  assign first_hash    = s1_hash_out;
+  assign matrix_result = s2_result_out;
+  assign keccak_hash   = k2_hash;
 
 endmodule

@@ -1,19 +1,19 @@
 // heavyhash_matrix.sv — 64x64 matrix-vector multiply for HeavyHash
 //
-// Stores the mining matrix in a 64-entry BRAM (256 bits per row).
-// Performs row-serial multiply: one row per cycle, 64 cycles total.
+// Dual-port BRAM: reads 2 rows/cycle (even on port A, odd on port B).
+// DSP48-packed multiplies: 2 products per DSP using nibble packing.
+//   Pack: A = {nib1, 6'b0, nib0}, B = {vec1, 6'b0, vec0}
+//   Product[7:0] = nib0*vec0, Product[27:20] = nib1*vec1
+//   Guard bands prevent cross-term contamination (max product=225 < 256).
 //
-// Algorithm per output element:
-//   acc = sum_{j=0}^{63} matrix[i][j] * vec[j]   (4-bit x 4-bit, 14-bit accum)
-//   result_nibble[i] = (acc >> 10) & 0xF
+// 4-stage dot-product pipeline per port:
+//   Stage 1 (registered): 32 DSP multiplies → 64 products
+//   Stage 2 (comb + reg): 8 sub-partial sums of 8 products each
+//   Stage 3 (comb + reg): 4 partial sums (pairs)
+//   Stage 4 (comb):       final 14-bit dot product
 //
-// Final output: XOR result nibbles with input hash
-//
-// PIPELINING (3-stage, for 100 MHz / 10 ns timing):
-//   Stage 1: 8 sub-partial sums of 8 products each (combinational, ~6-7 ns)
-//   Stage 2: Combine pairs into 4 partial sums (registered + combinational, ~3 ns)
-//   Stage 3: Final sum of 4 partial sums (registered + combinational, ~4 ns)
-// Throughput: 1 row/cycle after 2-cycle pipeline fill.
+// Total: 32 row-pairs + 4 pipeline fill = 36 cycles.
+// Resources per lane: 64 DSP48E1 (32 per port), ~500 LUTs (adder trees).
 
 module heavyhash_matrix
   import keccak_pkg::*,
@@ -36,10 +36,11 @@ module heavyhash_matrix
 );
 
   // ----------------------------------------------------------------
-  //  Matrix BRAM: 64 entries x 256 bits
+  //  Matrix BRAM: 64 entries x 256 bits, true dual-port read
   // ----------------------------------------------------------------
   logic [255:0] matrix_mem [0:63];
-  logic [255:0] mat_row;
+  logic [255:0] mat_row_a;   // even row data
+  logic [255:0] mat_row_b;   // odd row data
 
   // Write port
   always_ff @(posedge clk) begin
@@ -59,140 +60,126 @@ module heavyhash_matrix
     end
   end
 
-  // ----------------------------------------------------------------
-  //  3-stage pipelined dot product
+  // ================================================================
+  //  DSP-packed dot product — Port A (even rows)
   //
-  //  Stage 1 (combinational): 8 sub-partial sums of 8 products each.
-  //    Each sub-sum: max = 8 * 15 * 15 = 1800, fits in 11 bits.
-  //
-  //  Stage 2 (registered + combinational): Combine pairs → 4 partial sums.
-  //    Each partial sum: max = 3600, fits in 12 bits.
-  //
-  //  Stage 3 (registered + combinational): Final sum of 4 partial sums.
-  //    Final sum: max = 64 * 225 = 14400, fits in ACCUM_W = 14 bits.
-  // ----------------------------------------------------------------
+  //  32 DSPs, each computing 2 products via nibble packing.
+  //  DSP d handles matrix nibbles [2d] and [2d+1] × vec[2d] and [2d+1].
+  //  Sub-partial sum k uses DSPs [4k..4k+3] (8 products).
+  // ================================================================
 
-  // Stage 1: 8 sub-partial sums of 8 products each (combinational)
-  logic [10:0] spsum0, spsum1, spsum2, spsum3;
-  logic [10:0] spsum4, spsum5, spsum6, spsum7;
-
-  always_comb begin
-    spsum0 = '0;
-    for (int j = 0; j < 8; j++)
-      spsum0 = spsum0 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-  end
-
-  always_comb begin
-    spsum1 = '0;
-    for (int j = 8; j < 16; j++)
-      spsum1 = spsum1 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-  end
-
-  always_comb begin
-    spsum2 = '0;
-    for (int j = 16; j < 24; j++)
-      spsum2 = spsum2 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-  end
-
-  always_comb begin
-    spsum3 = '0;
-    for (int j = 24; j < 32; j++)
-      spsum3 = spsum3 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-  end
-
-  always_comb begin
-    spsum4 = '0;
-    for (int j = 32; j < 40; j++)
-      spsum4 = spsum4 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-  end
-
-  always_comb begin
-    spsum5 = '0;
-    for (int j = 40; j < 48; j++)
-      spsum5 = spsum5 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-  end
-
-  always_comb begin
-    spsum6 = '0;
-    for (int j = 48; j < 56; j++)
-      spsum6 = spsum6 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-  end
-
-  always_comb begin
-    spsum7 = '0;
-    for (int j = 56; j < 64; j++)
-      spsum7 = spsum7 + {4'b0, mat_row[j*4+3 -: 4]} * {4'b0, vec[j]};
-  end
-
-  // Register stage 1 outputs
-  logic [10:0] spsum0_r, spsum1_r, spsum2_r, spsum3_r;
-  logic [10:0] spsum4_r, spsum5_r, spsum6_r, spsum7_r;
+  // Stage 1: DSP multiplies (registered — maps to DSP48E1 MREG)
+  (* use_dsp = "yes" *)
+  logic [27:0] dsp_a [0:31];
 
   always_ff @(posedge clk) begin
-    spsum0_r <= spsum0;
-    spsum1_r <= spsum1;
-    spsum2_r <= spsum2;
-    spsum3_r <= spsum3;
-    spsum4_r <= spsum4;
-    spsum5_r <= spsum5;
-    spsum6_r <= spsum6;
-    spsum7_r <= spsum7;
+    for (int d = 0; d < 32; d++)
+      dsp_a[d] <= {14'b0, mat_row_a[(2*d+1)*4+3 -: 4], 6'b0, mat_row_a[(2*d)*4+3 -: 4]}
+                * {14'b0, vec[2*d+1], 6'b0, vec[2*d]};
   end
 
-  // Stage 2: combine pairs into 4 partial sums (combinational)
-  logic [11:0] psum0, psum1, psum2, psum3;
-  assign psum0 = {1'b0, spsum0_r} + {1'b0, spsum1_r};
-  assign psum1 = {1'b0, spsum2_r} + {1'b0, spsum3_r};
-  assign psum2 = {1'b0, spsum4_r} + {1'b0, spsum5_r};
-  assign psum3 = {1'b0, spsum6_r} + {1'b0, spsum7_r};
+  // Stage 2: sub-partial sums — 8 groups of 4 DSPs (combinational)
+  logic [10:0] a_spsum [0:7];
 
-  // Register stage 2 outputs
-  logic [11:0] psum0_r, psum1_r, psum2_r, psum3_r;
+  always_comb begin
+    for (int k = 0; k < 8; k++) begin
+      a_spsum[k] = '0;
+      for (int i = 0; i < 4; i++)
+        a_spsum[k] = a_spsum[k] + {3'b0, dsp_a[4*k+i][7:0]}
+                                 + {3'b0, dsp_a[4*k+i][27:20]};
+    end
+  end
+
+  // Register stage 2
+  logic [10:0] a_spsum_r [0:7];
+  always_ff @(posedge clk)
+    for (int k = 0; k < 8; k++)
+      a_spsum_r[k] <= a_spsum[k];
+
+  // Stage 3: partial sums — combine pairs (combinational)
+  logic [11:0] a_psum [0:3];
+  always_comb
+    for (int k = 0; k < 4; k++)
+      a_psum[k] = {1'b0, a_spsum_r[2*k]} + {1'b0, a_spsum_r[2*k+1]};
+
+  // Register stage 3
+  logic [11:0] a_psum_r [0:3];
+  always_ff @(posedge clk)
+    for (int k = 0; k < 4; k++)
+      a_psum_r[k] <= a_psum[k];
+
+  // Stage 4: final sum (combinational)
+  logic [ACCUM_W-1:0] dot_a;
+  assign dot_a = {2'b0, a_psum_r[0]} + {2'b0, a_psum_r[1]}
+               + {2'b0, a_psum_r[2]} + {2'b0, a_psum_r[3]};
+  wire [3:0] dot_nibble_a = dot_a[13:10];
+
+  // ================================================================
+  //  DSP-packed dot product — Port B (odd rows)
+  // ================================================================
+
+  (* use_dsp = "yes" *)
+  logic [27:0] dsp_b [0:31];
 
   always_ff @(posedge clk) begin
-    psum0_r <= psum0;
-    psum1_r <= psum1;
-    psum2_r <= psum2;
-    psum3_r <= psum3;
+    for (int d = 0; d < 32; d++)
+      dsp_b[d] <= {14'b0, mat_row_b[(2*d+1)*4+3 -: 4], 6'b0, mat_row_b[(2*d)*4+3 -: 4]}
+                * {14'b0, vec[2*d+1], 6'b0, vec[2*d]};
   end
 
-  // Stage 3: final sum (combinational, just 3 additions — very fast)
-  logic [ACCUM_W-1:0] dot;
-  assign dot = {2'b0, psum0_r} + {2'b0, psum1_r}
-             + {2'b0, psum2_r} + {2'b0, psum3_r};
+  logic [10:0] b_spsum [0:7];
+  always_comb begin
+    for (int k = 0; k < 8; k++) begin
+      b_spsum[k] = '0;
+      for (int i = 0; i < 4; i++)
+        b_spsum[k] = b_spsum[k] + {3'b0, dsp_b[4*k+i][7:0]}
+                                 + {3'b0, dsp_b[4*k+i][27:20]};
+    end
+  end
 
-  // Shifted and truncated result nibble
-  wire [3:0] dot_nibble = dot[13:10];
+  logic [10:0] b_spsum_r [0:7];
+  always_ff @(posedge clk)
+    for (int k = 0; k < 8; k++)
+      b_spsum_r[k] <= b_spsum[k];
 
-  // ----------------------------------------------------------------
-  //  Row-serial multiply FSM
+  logic [11:0] b_psum [0:3];
+  always_comb
+    for (int k = 0; k < 4; k++)
+      b_psum[k] = {1'b0, b_spsum_r[2*k]} + {1'b0, b_spsum_r[2*k+1]};
+
+  logic [11:0] b_psum_r [0:3];
+  always_ff @(posedge clk)
+    for (int k = 0; k < 4; k++)
+      b_psum_r[k] <= b_psum[k];
+
+  logic [ACCUM_W-1:0] dot_b;
+  assign dot_b = {2'b0, b_psum_r[0]} + {2'b0, b_psum_r[1]}
+               + {2'b0, b_psum_r[2]} + {2'b0, b_psum_r[3]};
+  wire [3:0] dot_nibble_b = dot_b[13:10];
+
+  // ================================================================
+  //  Row-serial multiply FSM (2 rows per cycle, 4-stage pipeline)
   //
-  //  Pipeline timing (after start):
-  //    Cycle 0: row_cnt=0 → BRAM read initiated
-  //    Cycle 1: mat_row = row 0 data → sub-partial sums computed (comb)
-  //    Cycle 2: sub-psums registered → partial sums computed (comb)
-  //    Cycle 3: partial sums registered → dot valid for row 0
-  //    Cycle N+3: dot valid for row N → store
-  //    Cycle 66: store result_nibbles[63], done
-  //
-  //  We use a 'pipe_cnt' that counts from 0 to 66:
-  //    pipe_cnt 0:     start → read row 0
-  //    pipe_cnt 1:     read row 1, sub-psums for row 0
-  //    pipe_cnt 2:     read row 2, psums for row 0, sub-psums for row 1
-  //    pipe_cnt 3:     dot valid for row 0 → store
-  //    pipe_cnt N+3:   dot valid for row N → store
-  //    pipe_cnt 66:    dot valid for row 63 → store, signal done
-  // ----------------------------------------------------------------
-  logic [6:0]   pipe_cnt;
+  //  pipe_cnt 0:     read rows 0,1
+  //  pipe_cnt 1:     BRAM data available, DSP inputs packed
+  //  pipe_cnt 2:     DSP products registered, sub-partial sums (comb)
+  //  pipe_cnt 3:     sub-psums registered, partial sums (comb)
+  //  pipe_cnt 4:     partial sums registered, dot valid rows 0,1 → store
+  //  pipe_cnt N+4:   dot valid rows 2N, 2N+1 → store
+  //  pipe_cnt 35:    dot valid rows 62,63 → store, done
+  // ================================================================
+  logic [5:0]   pipe_cnt;
   logic         running;
   logic [3:0]   result_nibbles [0:63];
 
   assign busy = running;
 
-  // BRAM read: address is pipe_cnt for the first 64 cycles
+  // Dual-port BRAM read: port A = even row, port B = odd row
   always_ff @(posedge clk) begin
-    if (pipe_cnt < 7'd64)
-      mat_row <= matrix_mem[pipe_cnt[5:0]];
+    if (pipe_cnt < 6'd32) begin
+      mat_row_a <= matrix_mem[{pipe_cnt[4:0], 1'b0}];   // row 2N
+      mat_row_b <= matrix_mem[{pipe_cnt[4:0], 1'b1}];   // row 2N+1
+    end
   end
 
   always_ff @(posedge clk or negedge rst_n) begin
@@ -205,19 +192,21 @@ module heavyhash_matrix
 
       if (start && !running) begin
         running  <= 1'b1;
-        pipe_cnt <= 7'd0;
+        pipe_cnt <= 6'd0;
       end else if (running) begin
-        // Store result nibble when dot is valid (pipe_cnt >= 3)
-        if (pipe_cnt >= 7'd3)
-          result_nibbles[pipe_cnt - 7'd3] <= dot_nibble;
+        // Store result nibbles when dots are valid (pipe_cnt >= 4)
+        if (pipe_cnt >= 6'd4) begin
+          result_nibbles[{(pipe_cnt[4:0] - 5'd4), 1'b0}] <= dot_nibble_a;  // even row
+          result_nibbles[{(pipe_cnt[4:0] - 5'd4), 1'b1}] <= dot_nibble_b;  // odd row
+        end
 
-        if (pipe_cnt == 7'd66) begin
-          // All 64 results stored (rows 0-63 at pipe_cnt 3-66)
+        if (pipe_cnt == 6'd35) begin
+          // All 64 results stored (row pairs 0..31 at pipe_cnt 4..35)
           running <= 1'b0;
           done    <= 1'b1;
           pipe_cnt <= '0;
         end else begin
-          pipe_cnt <= pipe_cnt + 7'd1;
+          pipe_cnt <= pipe_cnt + 6'd1;
         end
       end
     end

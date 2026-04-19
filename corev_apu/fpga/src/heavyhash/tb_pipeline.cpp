@@ -1,6 +1,7 @@
-// tb_pipeline.cpp — Verilator C++ testbench for heavyhash_pipeline
+// tb_pipeline.cpp — Verilator C++ testbench for pipelined heavyhash_pipeline
 //
-// Drives the pipeline with a known-good test vector from kaspad's pow_hashers.rs:
+// Tests the 3-stage pipelined pipeline (keccak1 → matrix → keccak2+compare)
+// with the same known-good test vector from kaspad's pow_hashers.rs:
 //   pre_pow_hash = [42]*32, timestamp = 5435345234, nonce = 432432432
 //
 // Expected results (kaspad convention):
@@ -16,9 +17,7 @@
 #include "verilated.h"
 #include "verilated_vcd_c.h"
 
-// Wide signal helpers: Verilator stores >64-bit signals as uint32_t arrays
-// Index 0 = bits [31:0], index 1 = bits [63:32], etc.
-
+// Wide signal helpers
 static void set_u64(uint32_t *dst, int lane, uint64_t val) {
     dst[lane*2]   = (uint32_t)(val & 0xFFFFFFFF);
     dst[lane*2+1] = (uint32_t)(val >> 32);
@@ -53,7 +52,6 @@ static int compare_256(const char *label, const uint32_t *actual, const uint64_t
         printf("[FAIL] %s MISMATCH!\n", label);
         print_hex("  actual  ", actual, 256);
         print_hex("  expected", exp32, 256);
-        // Show word-by-word diff
         for (int i = 0; i < 8; i++) {
             if (actual[i] != exp32[i])
                 printf("  word[%d]: got 0x%08x, exp 0x%08x\n", i, actual[i], exp32[i]);
@@ -63,10 +61,9 @@ static int compare_256(const char *label, const uint32_t *actual, const uint64_t
 }
 
 // ----------------------------------------------------------------
-//  Test vector data
+//  Test vector data (same as before)
 // ----------------------------------------------------------------
 
-// Mid-state 1 (ProofOfWorkHash) — 25 x u64 LE
 static const uint64_t MS1[25] = {
     0x113cff0da1f6d83dULL, 0x29bf8855b7027e3cULL, 0x1e5f2e720efb44d2ULL,
     0x1ba5a4a3f59869a0ULL, 0x7b2fafca875e2d65ULL, 0x4aef61d629dce246ULL,
@@ -79,7 +76,6 @@ static const uint64_t MS1[25] = {
     0x02b97c786f824383ULL,
 };
 
-// Mid-state 2 (HeavyHash) — 25 x u64 LE
 static const uint64_t MS2[25] = {
     0x3ad74c52b2248509ULL, 0x79629b0e2f9f4216ULL, 0x7a14ff4816c7f8eeULL,
     0x11a75f4c80056498ULL, 0xe720e0df44eecedeULL, 0x72c7d82e14f34069ULL,
@@ -92,7 +88,6 @@ static const uint64_t MS2[25] = {
     0x1619327d10b9da35ULL,
 };
 
-// Message block — 17 x u64 LE lanes (136 bytes with cSHAKE padding)
 static const uint64_t MSG_LANES[17] = {
     0x2a2a2a2a2a2a2a2aULL, 0x2a2a2a2a2a2a2a2aULL, 0x2a2a2a2a2a2a2a2aULL,
     0x2a2a2a2a2a2a2a2aULL, 0x0000000143f8c952ULL, 0x0000000000000000ULL,
@@ -102,7 +97,6 @@ static const uint64_t MSG_LANES[17] = {
     0x0000000000000000ULL, 0x8000000000000000ULL,
 };
 
-// Matrix: 64 rows x 256 bits, each row stored as 4 x u64 (LE)
 static const uint64_t MATRIX[64][4] = {
     { 0x5454545454545454ULL, 0x3f3f3f3f3f3f3f3fULL, 0xa2a2a2a2a2a2a2a2ULL, 0xaaaaaac4c4ae221eULL },
     { 0x5bdc39b9b9b1b1b9ULL, 0x37635fb6818605ffULL, 0x1593ce637eb73ef2ULL, 0x644711d6a9fa4801ULL },
@@ -170,7 +164,6 @@ static const uint64_t MATRIX[64][4] = {
     { 0x70a65a8c7c1ceb5aULL, 0x124e0b60d0cdbb65ULL, 0x4a2131fe35f7a17cULL, 0xe2713a5f4552b28bULL },
 };
 
-// Expected results
 static const uint64_t EXPECTED_POW_HASH[4] = {
     0xd8d00ddd632bb72fULL, 0xa0ecd4839fcd002bULL,
     0x886659c0b87e0b71ULL, 0xbf8a9778c5eb398fULL,
@@ -229,7 +222,7 @@ int main(int argc, char **argv) {
     dut->trace(tfp, 99);
     tfp->open("tb_pipeline.vcd");
 
-    printf("=== HeavyHash Pipeline Verilator Test ===\n");
+    printf("=== Pipelined HeavyHash Pipeline Verilator Test ===\n");
     printf("Test vector: pre_pow=[42]*32, ts=5435345234, nonce=432432432\n\n");
 
     // Initialize
@@ -241,14 +234,14 @@ int main(int argc, char **argv) {
 
     reset();
 
-    // Load mid-states (1600 bits = 50 x u32)
+    // Load mid-states
     printf("Loading mid-states...\n");
     for (int i = 0; i < 25; i++) {
         set_u64(dut->mid_state_1, i, MS1[i]);
         set_u64(dut->mid_state_2, i, MS2[i]);
     }
 
-    // Load message block (1088 bits = 34 x u32)
+    // Load message block
     printf("Loading message block...\n");
     for (int i = 0; i < 17; i++)
         set_u64(dut->msg_block, i, MSG_LANES[i]);
@@ -263,7 +256,7 @@ int main(int argc, char **argv) {
     for (int r = 0; r < 64; r++)
         write_matrix_row(r, MATRIX[r]);
 
-    // Verify matrix was loaded correctly
+    // Verify matrix BRAM
     printf("\nVerifying matrix BRAM contents...\n");
     {
         auto *rootp = dut->rootp;
@@ -292,90 +285,68 @@ int main(int argc, char **argv) {
     tick();
     dut->start = 0;
 
-    // Monitor pipeline state transitions and capture intermediate values
+    // Monitor pipeline stages
     int cycles = 0;
     const int MAX_CYCLES = 2000;
-    int prev_pstate = -1;
-    int first_hash_captured = 0;
-    int matrix_result_captured = 0;
-    int mat_debug_count = 0;
+    int prev_s1_valid = 0, prev_s2_valid = 0;
+    int first_hash_checked = 0, mat_result_checked = 0, final_hash_checked = 0;
+    int s1_cycle = 0, s2_cycle = 0, s3_cycle = 0;
 
     while (cycles < MAX_CYCLES) {
         tick();
         cycles++;
 
-        // Access internal pipeline state via rootp (one-hot ps[5:0])
         auto *rootp = dut->rootp;
-        int ps_bits = rootp->heavyhash_pipeline__DOT__ps;
-        // Decode one-hot to integer for display
-        int pstate = -1;
-        for (int b = 0; b < 6; b++)
-            if (ps_bits & (1 << b)) { pstate = b; break; }
 
-        // Print state transitions
-        if (pstate != prev_pstate) {
-            const char *names[] = {"IDLE", "HASH1", "MATRIX", "HASH2", "COMPARE", "FOUND"};
-            printf("cycle %4d: state -> %s (%d)\n", cycles,
-                   (pstate >= 0 && pstate <= 5) ? names[pstate] : "???", pstate);
+        // Stage 1: keccak1 output
+        int s1_valid = rootp->heavyhash_pipeline__DOT__s1_valid;
+        if (s1_valid && !prev_s1_valid && !first_hash_checked) {
+            first_hash_checked = 1;
+            s1_cycle = cycles;
+            printf("cycle %4d: Stage 1 done (keccak1 -> first_hash)\n", cycles);
+            print_hex("  first_hash", rootp->heavyhash_pipeline__DOT__first_hash, 256);
+            compare_256("first_hash (PowHash)",
+                       rootp->heavyhash_pipeline__DOT__first_hash,
+                       EXPECTED_POW_HASH);
 
-            // Capture first_hash when entering MATRIX state
-            if (pstate == 2 && !first_hash_captured) {
-                first_hash_captured = 1;
-                printf("\n--- First Hash (PowHash) captured ---\n");
-                print_hex("  first_hash", rootp->heavyhash_pipeline__DOT__first_hash, 256);
-                compare_256("first_hash (PowHash)",
-                           rootp->heavyhash_pipeline__DOT__first_hash,
-                           EXPECTED_POW_HASH);
-
-                // Print vec[] (input nibbles extracted from first_hash)
-                printf("  Input nibbles (vec[0..15]): ");
-                for (int j = 0; j < 16; j++)
-                    printf("%x ", rootp->heavyhash_pipeline__DOT__u_matrix__DOT__vec[j]);
-                printf("...\n");
-                printf("\n");
-            }
-
-            // Capture matrix_result when entering HASH2 state
-            if (pstate == 3 && !matrix_result_captured) {
-                matrix_result_captured = 1;
-                printf("\n--- Matrix Result captured ---\n");
-                print_hex("  matrix_result", rootp->heavyhash_pipeline__DOT__matrix_result, 256);
-                compare_256("matrix_result",
-                           rootp->heavyhash_pipeline__DOT__matrix_result,
-                           EXPECTED_MAT_PRODUCT);
-                printf("\n");
-            }
-
-            // At COMPARE state, capture the final Keccak hash
-            if (pstate == 4) {
-                printf("\n--- Final Hash captured at COMPARE ---\n");
-                // keccak_hash is the output of the shared keccak core
-                print_hex("  keccak_hash", rootp->heavyhash_pipeline__DOT__keccak_hash, 256);
-                compare_256("heavy_hash (final)",
-                           rootp->heavyhash_pipeline__DOT__keccak_hash,
-                           EXPECTED_HEAVY_HASH);
-                printf("\n");
-            }
-
-            prev_pstate = pstate;
+            // Print input nibbles
+            printf("  Input nibbles (vec[0..15]): ");
+            for (int j = 0; j < 16; j++)
+                printf("%x ", rootp->heavyhash_pipeline__DOT__u_matrix__DOT__vec[j]);
+            printf("...\n\n");
         }
+        prev_s1_valid = s1_valid;
 
-        // During MATRIX state, print dot product for first few rows
-        if (pstate == 2 && mat_debug_count < 10) {
-            auto *rootp2 = dut->rootp;
-            int pipe_cnt = rootp2->heavyhash_pipeline__DOT__u_matrix__DOT__pipe_cnt;
-            int running_m = rootp2->heavyhash_pipeline__DOT__u_matrix__DOT__running;
-            int dot_val = rootp2->heavyhash_pipeline__DOT__u_matrix__DOT__dot;
-            int dot_nib = (dot_val >> 10) & 0xF;
-            printf("  [mat cycle %d] pipe_cnt=%d running=%d dot=%d (0x%x) nibble=%x  mat_row[0..3]=",
-                   mat_debug_count, pipe_cnt, running_m, dot_val, dot_val, dot_nib);
-            print_hex("", rootp2->heavyhash_pipeline__DOT__u_matrix__DOT__mat_row, 256);
-            mat_debug_count++;
+        // Stage 2: matrix output
+        int s2_valid = rootp->heavyhash_pipeline__DOT__s2_valid;
+        if (s2_valid && !prev_s2_valid && !mat_result_checked) {
+            mat_result_checked = 1;
+            s2_cycle = cycles;
+            printf("cycle %4d: Stage 2 done (matrix -> matrix_result)\n", cycles);
+            print_hex("  matrix_result", rootp->heavyhash_pipeline__DOT__matrix_result, 256);
+            compare_256("matrix_result",
+                       rootp->heavyhash_pipeline__DOT__matrix_result,
+                       EXPECTED_MAT_PRODUCT);
+            printf("\n");
+        }
+        prev_s2_valid = s2_valid;
+
+        // Stage 3: keccak2 done
+        int k2_done = rootp->heavyhash_pipeline__DOT__k2_done;
+        if (k2_done && !final_hash_checked) {
+            final_hash_checked = 1;
+            s3_cycle = cycles;
+            printf("cycle %4d: Stage 3 done (keccak2 -> heavy_hash)\n", cycles);
+            print_hex("  keccak_hash", rootp->heavyhash_pipeline__DOT__keccak_hash, 256);
+            compare_256("heavy_hash (final)",
+                       rootp->heavyhash_pipeline__DOT__keccak_hash,
+                       EXPECTED_HEAVY_HASH);
+            printf("\n");
         }
 
         // Check for FOUND
         if (dut->found) {
-            printf("\nPipeline FOUND result after %d cycles\n", cycles);
+            printf("cycle %4d: FOUND!\n", cycles);
             printf("  nonce_found: %lu (0x%016lx)\n",
                    (unsigned long)dut->nonce_found,
                    (unsigned long)dut->nonce_found);
@@ -390,10 +361,14 @@ int main(int argc, char **argv) {
                dut->busy, (unsigned long)dut->hash_count);
     }
 
-    // Summary
-    printf("\n=== Summary ===\n");
-    printf("first_hash captured:    %s\n", first_hash_captured ? "YES" : "NO");
-    printf("matrix_result captured: %s\n", matrix_result_captured ? "YES" : "NO");
+    // Timing summary
+    printf("\n=== Pipeline Timing Summary ===\n");
+    printf("  Stage 1 (keccak1):  %d cycles\n", s1_cycle);
+    printf("  Stage 2 (matrix):   %d cycles (delta: %d)\n", s2_cycle, s2_cycle - s1_cycle);
+    printf("  Stage 3 (keccak2):  %d cycles (delta: %d)\n", s3_cycle, s3_cycle - s2_cycle);
+    printf("  Total to found:     %d cycles\n", cycles);
+    printf("  Steady-state throughput: 1 nonce / %d cycles (matrix bottleneck)\n",
+           s2_cycle - s1_cycle);
 
     // Stop
     dut->stop = 1;
