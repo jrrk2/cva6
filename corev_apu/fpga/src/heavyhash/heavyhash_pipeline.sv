@@ -3,13 +3,13 @@
 // Orchestrates: nonce patch -> 1st Keccak -> matrix multiply -> 2nd Keccak -> compare
 // Auto-increments nonce on each hash, stops when target met or halted.
 //
-// Timing per hash (single Keccak core, reused, 125 MHz mining clock):
-//   1st hash: 26 cycles (absorb + 24 rounds + squeeze)
+// Timing per hash (single Keccak core, reused, 100 MHz mining clock):
+//   1st hash: 27 cycles (1 pipeline + absorb + 24 rounds + squeeze)
 //   Matrix:   67 cycles (64 rows + 3-stage pipeline)
-//   2nd hash: 26 cycles
-//   Compare:   1 cycle
-//   Total:   ~121 cycles per nonce (~968 ns at 125 MHz)
-//   With 4 lanes: ~4.13 MH/s theoretical
+//   2nd hash: 27 cycles
+//   Compare:   2 cycles (1 wait + 1 registered check)
+//   Total:   ~124 cycles per nonce
+//   With 16 lanes at 125 MHz: ~16.1 MH/s theoretical
 
 module heavyhash_pipeline
   import keccak_pkg::*,
@@ -45,18 +45,21 @@ module heavyhash_pipeline
 );
 
   // ================================================================
-  //  Internal state
+  //  Internal state — one-hot FSM
+  //
+  //  One-hot encoding ensures `found` is a single FF output with
+  //  no combinational decode.  This eliminates glitches that could
+  //  be captured by the CDC synchronizer in heavyhash_top.
   // ================================================================
-  typedef enum logic [2:0] {
-    P_IDLE      = 3'd0,
-    P_HASH1     = 3'd1,  // first cSHAKE256
-    P_MATRIX    = 3'd2,  // matrix multiply
-    P_HASH2     = 3'd3,  // second cSHAKE256
-    P_COMPARE   = 3'd4,
-    P_FOUND     = 3'd5
-  } pipe_state_e;
+  localparam int PS_IDLE    = 0;
+  localparam int PS_HASH1   = 1;
+  localparam int PS_MATRIX  = 2;
+  localparam int PS_HASH2   = 3;
+  localparam int PS_COMPARE = 4;
+  localparam int PS_FOUND   = 5;
+  localparam int PS_COUNT   = 6;
 
-  pipe_state_e pstate;
+  logic [PS_COUNT-1:0] ps;
 
   logic [63:0] nonce_reg;
   logic [63:0] hash_cnt;
@@ -65,7 +68,7 @@ module heavyhash_pipeline
   logic running;
 
   assign busy       = running;
-  assign found      = (pstate == P_FOUND);
+  assign found      = ps[PS_FOUND];   // single FF, glitch-free
   assign nonce_found= nonce_reg;
   assign hash_count = hash_cnt;
 
@@ -79,15 +82,35 @@ module heavyhash_pipeline
   logic [255:0]   keccak_hash;
   logic           keccak_done;
 
+  // Pipeline registers to break high-fanout FSM→Keccak routing.
+  // ps[PS_HASHx] fans out to 1600+1088 bit muxes; registering the
+  // mux outputs lets the router place them near the Keccak, cutting
+  // the critical 10 ns cross-die route in half.
+  logic [1599:0]   keccak_mid_r;
+  logic [RATE-1:0] keccak_block_r;
+  logic            keccak_valid_r;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      keccak_mid_r   <= '0;
+      keccak_block_r <= '0;
+      keccak_valid_r <= 1'b0;
+    end else begin
+      keccak_mid_r   <= keccak_mid;
+      keccak_block_r <= keccak_block;
+      keccak_valid_r <= keccak_valid;
+    end
+  end
+
   keccak256 u_keccak (
-    .clk       ( clk          ),
-    .rst_n     ( rst_n        ),
-    .mid_state ( keccak_mid   ),
-    .in_block  ( keccak_block ),
-    .in_valid  ( keccak_valid ),
-    .in_ready  ( keccak_ready ),
-    .out_hash  ( keccak_hash  ),
-    .out_valid ( keccak_done  )
+    .clk       ( clk            ),
+    .rst_n     ( rst_n          ),
+    .mid_state ( keccak_mid_r   ),
+    .in_block  ( keccak_block_r ),
+    .in_valid  ( keccak_valid_r ),
+    .in_ready  ( keccak_ready   ),
+    .out_hash  ( keccak_hash    ),
+    .out_valid ( keccak_done    )
   );
 
   // ================================================================
@@ -145,29 +168,69 @@ module heavyhash_pipeline
     keccak_block = '0;
     keccak_valid = 1'b0;
 
-    case (pstate)
-      P_HASH1: begin
-        keccak_mid   = mid_state_1;
-        keccak_block = msg_with_nonce;
-        keccak_valid = keccak_ready;  // fire immediately when ready
-      end
-      P_HASH2: begin
-        keccak_mid   = mid_state_2;
-        keccak_block = hash2_block;
-        keccak_valid = keccak_ready;
-      end
-      default: ;
-    endcase
+    if (ps[PS_HASH1]) begin
+      keccak_mid   = mid_state_1;
+      keccak_block = msg_with_nonce;
+      keccak_valid = keccak_ready;  // fire immediately when ready
+    end else if (ps[PS_HASH2]) begin
+      keccak_mid   = mid_state_2;
+      keccak_block = hash2_block;
+      keccak_valid = keccak_ready;
+    end
   end
 
   // ================================================================
-  //  Pipeline FSM
+  //  Explicit word-by-word target comparison (MSB-first)
+  //
+  //  Replaces monolithic `keccak_hash <= target` which Vivado
+  //  mis-synthesizes for 256-bit operands at 125 MHz (carry chain
+  //  too deep for the clock period, producing silent wrong results).
   // ================================================================
-  logic hash1_started, hash2_started;
+  logic [7:0] cmp_lt;  // word[i]: hash < target
+  logic [7:0] cmp_eq;  // word[i]: hash == target
+
+  genvar cw;
+  generate
+    for (cw = 0; cw < 8; cw++) begin : gen_cmp
+      assign cmp_lt[cw] = (keccak_hash[cw*32 +: 32] < target[cw*32 +: 32]);
+      assign cmp_eq[cw] = (keccak_hash[cw*32 +: 32] == target[cw*32 +: 32]);
+    end
+  endgenerate
+
+  // hash <= target  ≡  hash < target  OR  hash == target
+  // MSB word is [7], LSB word is [0].
+  //
+  // Registered to give carry chains a full cycle to settle before
+  // the FSM samples the result.  The FSM uses hash_le_target
+  // (valid one cycle after P_HASH2→P_COMPARE transition).
+  logic hash_le_target_comb;
+  assign hash_le_target_comb =
+      cmp_lt[7]
+    | (cmp_eq[7] & cmp_lt[6])
+    | (cmp_eq[7] & cmp_eq[6] & cmp_lt[5])
+    | (cmp_eq[7] & cmp_eq[6] & cmp_eq[5] & cmp_lt[4])
+    | (cmp_eq[7] & cmp_eq[6] & cmp_eq[5] & cmp_eq[4] & cmp_lt[3])
+    | (cmp_eq[7] & cmp_eq[6] & cmp_eq[5] & cmp_eq[4] & cmp_eq[3] & cmp_lt[2])
+    | (cmp_eq[7] & cmp_eq[6] & cmp_eq[5] & cmp_eq[4] & cmp_eq[3] & cmp_eq[2] & cmp_lt[1])
+    | (cmp_eq[7] & cmp_eq[6] & cmp_eq[5] & cmp_eq[4] & cmp_eq[3] & cmp_eq[2] & cmp_eq[1] & (cmp_lt[0] | cmp_eq[0]));
+
+  logic hash_le_target;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)
+      hash_le_target <= 1'b0;
+    else
+      hash_le_target <= hash_le_target_comb;
+  end
+
+  // ================================================================
+  //  Pipeline FSM (one-hot)
+  // ================================================================
+  logic hash1_started, hash2_started, cmp_wait;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      pstate       <= P_IDLE;
+      ps           <= '0;
+      ps[PS_IDLE]  <= 1'b1;
       running      <= 1'b0;
       nonce_reg    <= '0;
       hash_cnt     <= '0;
@@ -176,87 +239,106 @@ module heavyhash_pipeline
       mat_start    <= 1'b0;
       hash1_started<= 1'b0;
       hash2_started<= 1'b0;
+      cmp_wait     <= 1'b0;
     end else begin
       mat_start <= 1'b0;
 
-      case (pstate)
-        P_IDLE: begin
-          if (start) begin
-            running      <= 1'b1;
-            nonce_reg    <= nonce_start;
-            hash_cnt     <= '0;
-            pstate       <= P_HASH1;
-            hash1_started<= 1'b0;
+      // ---- IDLE ----
+      if (ps[PS_IDLE]) begin
+        if (start) begin
+          running      <= 1'b1;
+          nonce_reg    <= nonce_start;
+          hash_cnt     <= '0;
+          ps           <= '0;
+          ps[PS_HASH1] <= 1'b1;
+          hash1_started<= 1'b0;
+        end
+      end
+
+      // ---- HASH1 ----
+      if (ps[PS_HASH1]) begin
+        if (stop) begin
+          ps          <= '0;
+          ps[PS_IDLE] <= 1'b1;
+          running     <= 1'b0;
+        end else begin
+          if (keccak_valid_r && keccak_ready)
+            hash1_started <= 1'b1;
+          if (keccak_done && hash1_started) begin
+            first_hash    <= keccak_hash;
+            mat_start     <= 1'b1;
+            ps            <= '0;
+            ps[PS_MATRIX] <= 1'b1;
+            hash1_started <= 1'b0;
           end
         end
+      end
 
-        P_HASH1: begin
-          if (stop) begin
-            pstate  <= P_IDLE;
-            running <= 1'b0;
-          end else begin
-            // Wait for Keccak to accept input then wait for result
-            if (keccak_valid && keccak_ready)
-              hash1_started <= 1'b1;
-            if (keccak_done && hash1_started) begin
-              first_hash    <= keccak_hash;
-              mat_start     <= 1'b1;
-              pstate        <= P_MATRIX;
-              hash1_started <= 1'b0;
-            end
-          end
+      // ---- MATRIX ----
+      if (ps[PS_MATRIX]) begin
+        if (stop) begin
+          ps          <= '0;
+          ps[PS_IDLE] <= 1'b1;
+          running     <= 1'b0;
+        end else if (mat_done) begin
+          matrix_result <= mat_hash_out;
+          ps            <= '0;
+          ps[PS_HASH2]  <= 1'b1;
+          hash2_started <= 1'b0;
         end
+      end
 
-        P_MATRIX: begin
-          if (stop) begin
-            pstate  <= P_IDLE;
-            running <= 1'b0;
-          end else if (mat_done) begin
-            matrix_result <= mat_hash_out;
-            pstate        <= P_HASH2;
+      // ---- HASH2 ----
+      if (ps[PS_HASH2]) begin
+        if (stop) begin
+          ps          <= '0;
+          ps[PS_IDLE] <= 1'b1;
+          running     <= 1'b0;
+        end else begin
+          if (keccak_valid_r && keccak_ready)
+            hash2_started <= 1'b1;
+          if (keccak_done && hash2_started) begin
+            hash_cnt      <= hash_cnt + 64'd1;
             hash2_started <= 1'b0;
+            ps            <= '0;
+            ps[PS_COMPARE]<= 1'b1;
           end
         end
+      end
 
-        P_HASH2: begin
-          if (stop) begin
-            pstate  <= P_IDLE;
-            running <= 1'b0;
-          end else begin
-            if (keccak_valid && keccak_ready)
-              hash2_started <= 1'b1;
-            if (keccak_done && hash2_started) begin
-              hash_cnt      <= hash_cnt + 64'd1;
-              hash2_started <= 1'b0;
-              pstate        <= P_COMPARE;
-            end
-          end
-        end
-
-        P_COMPARE: begin
-          // Compare final hash with target (unsigned LE comparison)
-          // keccak_hash is still valid from last cycle
-          if (keccak_hash <= target) begin
-            pstate <= P_FOUND;
+      // ---- COMPARE ----
+      if (ps[PS_COMPARE]) begin
+        // Wait one cycle for registered comparison to capture the
+        // new keccak_hash result (hash_le_target lags by one cycle).
+        if (!cmp_wait) begin
+          cmp_wait <= 1'b1;
+        end else begin
+          cmp_wait <= 1'b0;
+          if (hash_le_target) begin
+            ps           <= '0;
+            ps[PS_FOUND] <= 1'b1;
           end else if (stop) begin
-            pstate  <= P_IDLE;
-            running <= 1'b0;
+            ps          <= '0;
+            ps[PS_IDLE] <= 1'b1;
+            running     <= 1'b0;
           end else begin
             // Increment nonce and continue
-            nonce_reg <= nonce_reg + 64'(NONCE_STEP);
-            pstate    <= P_HASH1;
+            nonce_reg    <= nonce_reg + 64'(NONCE_STEP);
+            ps           <= '0;
+            ps[PS_HASH1] <= 1'b1;
           end
         end
+      end
 
-        P_FOUND: begin
-          // Stay here until software reads the result and stops
-          running <= 1'b0;
-          if (stop)
-            pstate <= P_IDLE;
+      // ---- FOUND ----
+      if (ps[PS_FOUND]) begin
+        // Stay here until software reads the result and stops
+        running <= 1'b0;
+        if (stop) begin
+          ps          <= '0;
+          ps[PS_IDLE] <= 1'b1;
         end
-
-        default: pstate <= P_IDLE;
-      endcase
+      end
     end
   end
 

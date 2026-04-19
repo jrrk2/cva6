@@ -57,8 +57,95 @@ reg        byte_sync, sync, irq_en, tx_busy;
 
    wire [7:0] m_enb = (we_d ? core_lsu_be : 8'hFF);
    logic cooked, tx_enable_old, loopback, promiscuous;
-   logic [3:0] spare;   
+   logic [3:0] spare;
    logic [10:0] rx_addr_axis;
+
+   // ================================================================
+   //  CDC synchronizers (rx_clk 125 MHz <-> msoc_clk 50 MHz)
+   // ================================================================
+
+   // --- Buffer pointers: msoc_clk → rx_clk (2FF sync) ---
+   // These are quasi-static during packet reception (only change
+   // between frames), so 2FF is sufficient.
+   (* ASYNC_REG = "TRUE" *) reg [4:0] nextbuf_sync1, nextbuf_sync2;
+   (* ASYNC_REG = "TRUE" *) reg [4:0] firstbuf_sync1, firstbuf_sync2;
+   (* ASYNC_REG = "TRUE" *) reg [4:0] lastbuf_sync1, lastbuf_sync2;
+
+   always @(posedge rx_clk) begin
+      nextbuf_sync1  <= nextbuf;   nextbuf_sync2  <= nextbuf_sync1;
+      firstbuf_sync1 <= firstbuf;  firstbuf_sync2 <= firstbuf_sync1;
+      lastbuf_sync1  <= lastbuf;   lastbuf_sync2  <= lastbuf_sync1;
+   end
+
+   // --- Frame-done: rx_clk → msoc_clk (toggle + 2FF edge detect) ---
+   // Toggled when last transitions 0→non-zero (end of frame).
+   reg frame_done_toggle;
+   (* ASYNC_REG = "TRUE" *) reg frame_done_sync1, frame_done_sync2;
+   reg frame_done_sync3;
+   wire frame_done_pulse = frame_done_sync2 ^ frame_done_sync3;
+
+   always @(posedge rx_clk or posedge rst_int)
+      if (rst_int) frame_done_toggle <= 1'b0;
+      else if (rx_axis_tlast && byte_sync) frame_done_toggle <= ~frame_done_toggle;
+
+   always @(posedge msoc_clk or posedge rst_int)
+      if (rst_int) begin
+         frame_done_sync1 <= 1'b0;
+         frame_done_sync2 <= 1'b0;
+         frame_done_sync3 <= 1'b0;
+      end else begin
+         frame_done_sync1 <= frame_done_toggle;
+         frame_done_sync2 <= frame_done_sync1;
+         frame_done_sync3 <= frame_done_sync2;
+      end
+
+   // --- rx_dest_mac snapshot in msoc_clk domain ---
+   // Captured on frame_done_pulse; stable by then (written during first 6 bytes).
+   reg [47:0] rx_dest_mac_s;
+   reg [10:0] rx_length_s;    // length snapshot for current frame
+   reg        frame_pending;  // a frame is waiting for MAC check
+
+   always @(posedge msoc_clk or posedge rst_int)
+      if (rst_int) begin
+         rx_dest_mac_s <= '0;
+         rx_length_s   <= '0;
+         frame_pending <= 1'b0;
+      end else begin
+         if (frame_done_pulse) begin
+            rx_dest_mac_s <= rx_dest_mac;
+            frame_pending <= 1'b1;
+         end
+         if (frame_pending && !frame_done_pulse) begin
+            // Process in next cycle after capture
+            frame_pending <= 1'b0;
+         end
+      end
+
+   // --- TX enable: msoc_clk → eth_clk (single-bit 2FF) ---
+   wire tx_enable_rdy = &tx_enable_dly;  // all-ones detect in msoc_clk
+   (* ASYNC_REG = "TRUE" *) reg tx_enable_rdy_sync1, tx_enable_rdy_sync2;
+
+   always @(posedge eth_clk or posedge rst_int)
+      if (rst_int) begin
+         tx_enable_rdy_sync1 <= 1'b0;
+         tx_enable_rdy_sync2 <= 1'b0;
+      end else begin
+         tx_enable_rdy_sync1 <= tx_enable_rdy;
+         tx_enable_rdy_sync2 <= tx_enable_rdy_sync1;
+      end
+
+   // --- TX status: eth_clk → msoc_clk (single-bit 2FF) ---
+   (* ASYNC_REG = "TRUE" *) reg tx_enable_i_sync1, tx_enable_i_sync2;
+   (* ASYNC_REG = "TRUE" *) reg mac_gmii_tx_en_sync1, mac_gmii_tx_en_sync2;
+
+   always @(posedge msoc_clk or posedge rst_int)
+      if (rst_int) begin
+         tx_enable_i_sync1    <= 1'b0; tx_enable_i_sync2    <= 1'b0;
+         mac_gmii_tx_en_sync1 <= 1'b0; mac_gmii_tx_en_sync2 <= 1'b0;
+      end else begin
+         tx_enable_i_sync1    <= tx_enable_i;     tx_enable_i_sync2    <= tx_enable_i_sync1;
+         mac_gmii_tx_en_sync1 <= mac_gmii_tx_en;  mac_gmii_tx_en_sync2 <= mac_gmii_tx_en_sync1;
+      end
    
        /*
         * AXI input
@@ -91,7 +178,8 @@ reg        byte_sync, sync, irq_en, tx_busy;
        end
      else
        begin
-	  if (rx_axis_tvalid && (byte_sync == 0) && (nextbuf != (firstbuf+lastbuf)&31))
+          // Use synchronized buffer pointers for buffer-full check
+	  if (rx_axis_tvalid && (byte_sync == 0) && (nextbuf_sync2 != (firstbuf_sync2+lastbuf_sync2)&31))
             begin
                byte_sync <= 1'b1;
             end
@@ -121,7 +209,7 @@ reg        byte_sync, sync, irq_en, tx_busy;
                                     .clka(rx_clk),                // Port A Clock
                                     .clkb(msoc_clk),              // Port B Clock
                                     .douta(),                     // Port A 8-bit Data Output
-                                    .addra({nextbuf[4:0],rx_addr_axis[10:3],rx_addr_axis[1:0]}),    // Port A 15-bit Address Input
+                                    .addra({nextbuf_sync2[4:0],rx_addr_axis[10:3],rx_addr_axis[1:0]}),    // Port A 15-bit Address Input (sync'd)
                                     .dina({rx_axis_tdata,rx_axis_tdata}), // Port A 8-bit Data Input
                                     .ena(rx_axis_tvalid),         // Port A RAM Enable Input
                                     .wea(rx_wr),                  // Port A Write Enable Input
@@ -190,17 +278,18 @@ always @(posedge msoc_clk)
         6: begin firstbuf <= core_lsu_wdata[4:0]; end
         default:;
       endcase
-       if ((last > 0) && ~sync)
+       // Use synchronized frame_done pulse instead of raw `last` from rx_clk
+       if (frame_pending && ~sync)
          begin
-         // check broadcast/multicast address
-	     sync <= (rx_dest_mac[47:24]==24'h01005E) | (&rx_dest_mac) | (mac_address == rx_dest_mac) | promiscuous;
+         // check broadcast/multicast address using synchronized rx_dest_mac snapshot
+	     sync <= (rx_dest_mac_s[47:24]==24'h01005E) | (&rx_dest_mac_s) | (mac_address == rx_dest_mac_s) | promiscuous;
          end
-       else if (!last)
+       else if (!frame_pending && sync)
          begin
-            if (sync) nextbuf <= nextbuf + 1'b1;
+            nextbuf <= nextbuf + 1'b1;
             sync <= 1'b0;
          end
-       if (mac_gmii_tx_en && tx_enable_i)
+       if (mac_gmii_tx_en_sync2 && tx_enable_i_sync2)  // synchronized from eth_clk
          begin
             tx_enable_dly <= 0;
          end
@@ -209,7 +298,7 @@ always @(posedge msoc_clk)
          tx_busy <= 1'b1;
          tx_enable_dly <= tx_enable_dly + !(&tx_enable_dly);
          end
-       else if (~mac_gmii_tx_en)
+       else if (~mac_gmii_tx_en_sync2)  // synchronized from eth_clk
          tx_busy <= 1'b0;         
     end
 
@@ -224,7 +313,7 @@ always @(posedge eth_clk)
          begin
             tx_enable_i <= 1'b0;
          end
-       else if (1'b1 == &tx_enable_dly)
+       else if (tx_enable_rdy_sync2)  // synchronized from msoc_clk
          tx_enable_i <= 1'b1;
     end
    
@@ -306,7 +395,7 @@ always @(posedge eth_clk)
             end
 	  if (rx_axis_tlast)
             begin
-	        rx_length_axis[nextbuf] <= rx_addr_axis + 1;
+	        rx_length_axis[nextbuf_sync2] <= rx_addr_axis + 1;  // sync'd nextbuf
 	        rx_addr_axis <= 'b0;
             end
       end

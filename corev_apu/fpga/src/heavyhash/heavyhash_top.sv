@@ -259,10 +259,10 @@ module heavyhash_top
   end
 
   // ================================================================
-  //  Multi-lane pipeline instantiation (125 MHz domain, 4 lanes)
+  //  Multi-lane pipeline instantiation (125 MHz domain, 16 lanes)
   // ================================================================
   heavyhash_multi #(
-    .NUM_LANES ( 4 )
+    .NUM_LANES ( 16 )
   ) u_multi (
     .clk         ( hh_clk            ),
     .rst_n       ( rst_100_n         ),

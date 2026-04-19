@@ -56,10 +56,10 @@ module dualmem_widen8 #(
    assign din1 = {NBANKS{dinb}};
 
    always @(posedge clka)
-     begin
 	addra_dly <= addra;
+
+   always @(posedge clkb)
 	addrb_dly <= addrb;
-     end
 
    generate for (r = 0; r < NBRAMS; r=r+1)
      RAMB16_S9_S36

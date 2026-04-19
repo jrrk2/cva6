@@ -58,8 +58,12 @@ set_property -dict {PACKAGE_PIN AH33 IOSTANDARD LVCMOS18} [get_ports eth_mdc]
 set_property -dict {PACKAGE_PIN AK33 IOSTANDARD LVCMOS18} [get_ports eth_mdio]
 set_false_path -to [get_ports eth_mdc]
 
-## CDC: GTX userclk2 (62.5 MHz) is async to sys_clk (50 MHz)
-set_clock_groups -asynchronous -group [get_clocks -include_generated_clocks sgmii_refclk]
+## CDC: GTX userclk2 (125 MHz) is async to sys_clk (50 MHz)
+## The PCS/PMA IP generates clkout0 from GTX TXOUTCLK via internal MMCM.
+## Vivado can't trace through the GTX PLL, so we must name it explicitly.
+set_clock_groups -asynchronous -group [get_clocks -include_generated_clocks sgmii_refclk] \
+                               -group [get_clocks -include_generated_clocks clkout0] \
+                               -group [get_clocks -include_generated_clocks clk_out1_xlnx_clk_gen]
 
 #############################################
 ## SD Card

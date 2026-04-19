@@ -59,8 +59,10 @@ module heavyhash_multi
   assign found = any_found;
 
   // Priority-encode winning lane (lowest index wins on tie)
+  // Default to zero (not lane 0's nonce) so a spurious found
+  // event cannot accidentally submit an in-progress nonce.
   always_comb begin
-    nonce_found = lane_nonce[0];
+    nonce_found = '0;
     for (int i = NUM_LANES-1; i >= 0; i--) begin
       if (lane_found[i])
         nonce_found = lane_nonce[i];

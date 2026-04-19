@@ -304,9 +304,13 @@ int main(int argc, char **argv) {
         tick();
         cycles++;
 
-        // Access internal pipeline state via rootp
+        // Access internal pipeline state via rootp (one-hot ps[5:0])
         auto *rootp = dut->rootp;
-        int pstate = rootp->heavyhash_pipeline__DOT__pstate;
+        int ps_bits = rootp->heavyhash_pipeline__DOT__ps;
+        // Decode one-hot to integer for display
+        int pstate = -1;
+        for (int b = 0; b < 6; b++)
+            if (ps_bits & (1 << b)) { pstate = b; break; }
 
         // Print state transitions
         if (pstate != prev_pstate) {
