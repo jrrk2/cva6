@@ -37,34 +37,32 @@ set_property -dict {PACKAGE_PIN BB31 IOSTANDARD LVCMOS18} [get_ports {sw[7]}]
 set_property -dict {PACKAGE_PIN BA37 IOSTANDARD LVCMOS18} [get_ports fan_pwm]
 #set_property -dict { PACKAGE_PIN V21   IOSTANDARD LVCMOS18 } [get_ports { FAN_TACH }]; #IO_L22P_T3_A05_D21_14 Sch=fan_tac
 
-## Ethernet
-set_property -dict {PACKAGE_PIN N26 IOSTANDARD LVCMOS18} [get_ports eth_rst_n]; #IO_L14N_T2_SRCC_12 Sch=eth_phyrst_n
-set_property -dict {PACKAGE_PIN N25 IOSTANDARD LVCMOS18} [get_ports eth_txck]; #IO_L14P_T2_SRCC_33 Sch=eth_tx_clk
-set_property -dict {PACKAGE_PIN P23 IOSTANDARD LVCMOS18} [get_ports eth_txctl]; #IO_L20P_T3_33 Sch=eth_tx_en
-set_property -dict {PACKAGE_PIN M26 IOSTANDARD LVCMOS18} [get_ports { eth_txd[0] }]; #IO_L22N_T3_33 Sch=eth_tx_d[0]
-set_property -dict {PACKAGE_PIN L27 IOSTANDARD LVCMOS18} [get_ports { eth_txd[1] }]; #IO_L17P_T2_33 Sch=eth_tx_d[1]
-set_property -dict {PACKAGE_PIN M27 IOSTANDARD LVCMOS18} [get_ports { eth_txd[2] }]; #IO_L18N_T2_33 Sch=eth_tx_d[2]
-set_property -dict {PACKAGE_PIN N24 IOSTANDARD LVCMOS18} [get_ports { eth_txd[3] }]; #IO_L17N_T2_33 Sch=eth_tx_d[3]
-set_property -dict {PACKAGE_PIN M21 IOSTANDARD LVCMOS18} [get_ports { eth_rxd[0] }]; #IO_L21N_T3_DQS_33 Sch=eth_rx_d[0]
-set_property -dict {PACKAGE_PIN M24 IOSTANDARD LVCMOS18} [get_ports eth_rxck]; #IO_L13P_T2_MRCC_33 Sch=eth_rx_clk
-set_property -dict {PACKAGE_PIN L25 IOSTANDARD LVCMOS18} [get_ports eth_rxctl]; #IO_L18P_T2_33 Sch=eth_rx_ctl
-set_property -dict {PACKAGE_PIN J22 IOSTANDARD LVCMOS18} [get_ports { eth_rxd[1] }]; #IO_L21P_T3_DQS_33 Sch=eth_rx_d[1]
-set_property -dict {PACKAGE_PIN K22 IOSTANDARD LVCMOS18} [get_ports { eth_rxd[2] }]; #IO_L20N_T3_33 Sch=eth_rx_d[2]
-set_property -dict {PACKAGE_PIN L26 IOSTANDARD LVCMOS18} [get_ports { eth_rxd[3] }]; #IO_L22P_T3_33 Sch=eth_rx_d[3]
-set_property -dict {PACKAGE_PIN N23 IOSTANDARD LVCMOS18} [get_ports eth_mdc ]; #IO_L23P_T3_33 Sch=eth_mdc
-set_property -dict {PACKAGE_PIN L21 IOSTANDARD LVCMOS18} [get_ports eth_mdio]; #IO_L23N_T3_33 Sch=eth_mdio
-
-# set_property -dict {PACKAGE_PIN AK15  IOSTANDARD LVCMOS18} [get_ports { eth_pme_b }]; #IO_L1N_T0_32 Sch=eth_pmeb
-# set_property -dict {PACKAGE_PIN AK16  IOSTANDARD LVCMOS18} [get_ports { eth_int_b }]; #IO_L1P_T0_32 Sch=eth_intb
+## Ethernet: SGMII to the Marvell 88E1111 through a GTX transceiver,
+## 125 MHz reference clock from the board
+set_property PACKAGE_PIN AH8 [get_ports sgmii_refclk_p]
+set_property PACKAGE_PIN AH7 [get_ports sgmii_refclk_n]
+set_property PACKAGE_PIN AN2 [get_ports sgmii_txp]
+set_property PACKAGE_PIN AN1 [get_ports sgmii_txn]
+set_property PACKAGE_PIN AM8 [get_ports sgmii_rxp]
+set_property PACKAGE_PIN AM7 [get_ports sgmii_rxn]
+set_property -dict {PACKAGE_PIN AJ33 IOSTANDARD LVCMOS18} [get_ports eth_rst_n]
+set_false_path -to [get_ports eth_rst_n]
 
 #############################################
-# Ethernet Constraints for 1Gb/s
+# Ethernet clocks
 #############################################
-# Modified for 125MHz receive clock
-create_clock -period 8.000 -name eth_rxck [get_ports eth_rxck]
+create_clock -period 8.000 -name sgmii_refclk [get_ports sgmii_refclk_p]
+# the transceiver's 62.5 MHz output clocks; the PHY's MMCMs derive the 125 MHz GMII transmit
+# and receive clocks from them
+create_clock -period 16.000 -name eth_txout [get_pins -hierarchical -filter {NAME =~ */i_phy/GTXE2_CHANNEL/TXOUTCLK}]
+create_clock -period 16.000 -name eth_rxout [get_pins -hierarchical -filter {NAME =~ */i_phy/GTXE2_CHANNEL/RXOUTCLK}]
 
-set_clock_groups -asynchronous -group [get_clocks eth_rxck -include_generated_clocks]
-set_clock_groups -asynchronous -group [get_clocks clk_out2_xlnx_clk_gen]
+# Every crossing between the system clock, the PCS's transmit clocks and its receive clocks
+# goes through a synchroniser or a held-steady handshake (legend_eth's FIFOs, legend_sgmii's
+# resets, the PHY's own crossings).
+set_clock_groups -asynchronous -group [get_clocks sgmii_refclk]
+set_clock_groups -asynchronous -group [get_clocks -include_generated_clocks eth_txout]
+set_clock_groups -asynchronous -group [get_clocks -include_generated_clocks eth_rxout]
 
 #############################################
 ## SD Card
@@ -125,3 +123,9 @@ set_max_delay -from [get_ports trst ] 20
 # reset signal
 # set_false_path -from [get_ports { trst } ]
 # set_false_path -from [get_pins i_ddr/u_xlnx_mig_7_ddr3_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep/C]
+
+# Configuration. Do not hold the start-up sequence for the DCI impedance match: on this board
+# it never reports a match and the FPGA would stay unconfigured (DONE low).
+set_property CFGBVS GND [current_design]
+set_property CONFIG_VOLTAGE 1.8 [current_design]
+set_property BITSTREAM.STARTUP.MATCH_CYCLE NoWait [current_design]

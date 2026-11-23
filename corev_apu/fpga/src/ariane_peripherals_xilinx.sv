@@ -20,7 +20,8 @@ module ariane_peripherals #(
     parameter int AxiUserWidth = 1,
     parameter bit InclUART     = 1,
     parameter bit InclSPI      = 0,
-    parameter bit InclEthernet = 0,
+    parameter bit InclEthernet = 0,       // lowRISC's RGMII Ethernet (not on the VC707)
+    parameter bit InclLegendEthernet = 0, // legend64's SGMII Ethernet with DMA (VC707 only)
     parameter bit InclGPIO     = 0,
     parameter bit InclTimer    = 1
 ) (
@@ -50,6 +51,23 @@ module ariane_peripherals #(
     // MDIO Interface
     inout  wire        eth_mdio        ,
     output logic       eth_mdc         ,
+    // Ethernet over SGMII (InclLegendEthernet): the PHY's serial pins and the memory port
+    // through which the MAC reads and writes packets (to the core's device port)
+    input  wire        sgmii_rxp       ,
+    input  wire        sgmii_rxn       ,
+    output wire        sgmii_txp       ,
+    output wire        sgmii_txn       ,
+    input  wire        sgmii_refclk_p  ,
+    input  wire        sgmii_refclk_n  ,
+    output wire        eth_link_up_o   ,
+    output wire        eth_dma_req_o   ,
+    output wire        eth_dma_we_o    ,
+    output wire [29:0] eth_dma_addr_o  ,
+    output wire [63:0] eth_dma_wdata_o ,
+    output wire [7:0]  eth_dma_be_o    ,
+    input  wire        eth_dma_gnt_i   ,
+    input  wire        eth_dma_rvalid_i,
+    input  wire [63:0] eth_dma_rdata_i ,
     // SPI
     output logic       spi_clk_o       ,
     output logic       spi_mosi        ,
@@ -508,7 +526,35 @@ module ariane_peripherals #(
     // 4. Ethernet
     // ---------------
 
-    if (InclEthernet) begin : gen_ethernet
+    if (InclLegendEthernet) begin : gen_legend_ethernet
+        legend_eth_axi #(
+            .AxiAddrWidth ( AxiAddrWidth ),
+            .AxiDataWidth ( AxiDataWidth ),
+            .AxiIdWidth   ( AxiIdWidth   ),
+            .AxiUserWidth ( AxiUserWidth )
+        ) i_legend_eth (
+            .clk_i          ( clk_i            ),
+            .rst_ni         ( rst_ni           ),
+            .axi            ( ethernet         ),
+            .irq_o          ( irq_sources[2]   ),
+            .e_req_o        ( eth_dma_req_o    ),
+            .e_we_o         ( eth_dma_we_o     ),
+            .e_addr_o       ( eth_dma_addr_o   ),
+            .e_wdata_o      ( eth_dma_wdata_o  ),
+            .e_be_o         ( eth_dma_be_o     ),
+            .e_gnt_i        ( eth_dma_gnt_i    ),
+            .e_rvalid_i     ( eth_dma_rvalid_i ),
+            .e_rdata_i      ( eth_dma_rdata_i  ),
+            .sgmii_rxp      ( sgmii_rxp        ),
+            .sgmii_rxn      ( sgmii_rxn        ),
+            .sgmii_txp      ( sgmii_txp        ),
+            .sgmii_txn      ( sgmii_txn        ),
+            .sgmii_refclk_p ( sgmii_refclk_p   ),
+            .sgmii_refclk_n ( sgmii_refclk_n   ),
+            .phy_reset_no   ( eth_rst_n        ),
+            .link_up_o      ( eth_link_up_o    )
+        );
+    end else if (InclEthernet) begin : gen_ethernet
 
     logic                    clk_200_int, clk_rgmii, clk_rgmii_quad;
     logic                    eth_en, eth_we, eth_int_n, eth_pme_n, eth_mdio_i, eth_mdio_o, eth_mdio_oe;
@@ -592,6 +638,17 @@ module ariane_peripherals #(
         assign ethernet.r_resp = axi_pkg::RESP_SLVERR;
         assign ethernet.r_data = 'hdeadbeef;
         assign ethernet.r_last = 1'b1;
+    end
+
+    if (!InclLegendEthernet) begin : gen_no_legend_ethernet
+        assign sgmii_txp       = 1'b0;
+        assign sgmii_txn       = 1'b0;
+        assign eth_link_up_o   = 1'b0;
+        assign eth_dma_req_o   = 1'b0;
+        assign eth_dma_we_o    = 1'b0;
+        assign eth_dma_addr_o  = '0;
+        assign eth_dma_wdata_o = '0;
+        assign eth_dma_be_o    = '0;
     end
 
     // 5. GPIO

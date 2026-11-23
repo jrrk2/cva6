@@ -382,6 +382,16 @@ ${CVA6_REPO_DIR}/corev_apu/instr_tracing/rv_encapsulator-main/src/rtl/encapsulat
 ${CVA6_REPO_DIR}/corev_apu/fpga/src/ariane_peripherals_xilinx.sv
 ${CVA6_REPO_DIR}/corev_apu/fpga/src/ariane_xilinx.sv
 ${CVA6_REPO_DIR}/corev_apu/fpga/src/fan_ctrl.sv
+// Ethernet of the VC707: legend64's MAC with DMA over SGMII
+${CVA6_REPO_DIR}/corev_apu/fpga/src/legend-ethernet/legend_lfsr.sv
+${CVA6_REPO_DIR}/corev_apu/fpga/src/legend-ethernet/legend_axis_gmii_rx.sv
+${CVA6_REPO_DIR}/corev_apu/fpga/src/legend-ethernet/legend_axis_gmii_tx.sv
+${CVA6_REPO_DIR}/corev_apu/fpga/src/legend-ethernet/legend_eth_mac_1g.sv
+${CVA6_REPO_DIR}/corev_apu/fpga/src/legend-ethernet/liteeth_sgmii_phy.v
+${CVA6_REPO_DIR}/corev_apu/fpga/src/legend-ethernet/legend_sgmii.sv
+${CVA6_REPO_DIR}/corev_apu/fpga/src/legend-ethernet/legend_eth.sv
+${CVA6_REPO_DIR}/corev_apu/fpga/src/legend-ethernet/legend_eth_axi.sv
+// Ethernet of the other boards: lowRISC's RGMII MAC
 ${CVA6_REPO_DIR}/corev_apu/fpga/src/ariane-ethernet/axis_gmii_rx.sv
 ${CVA6_REPO_DIR}/corev_apu/fpga/src/ariane-ethernet/axis_gmii_tx.sv
 ${CVA6_REPO_DIR}/corev_apu/fpga/src/ariane-ethernet/dualmem_widen8.sv

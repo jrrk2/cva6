@@ -12,6 +12,7 @@
 // Author: Florian Zaruba <zarubaf@iis.ee.ethz.ch>
 `include "axi/assign.svh"
 `include "rvfi_types.svh"
+`include "ypb_types.svh"
 `include "iti_types.svh"
 
 module ariane_xilinx (
@@ -102,15 +103,14 @@ module ariane_xilinx (
   output logic [ 0:0]  ddr3_cs_n   ,
   output logic [ 7:0]  ddr3_dm     ,
   output logic [ 0:0]  ddr3_odt    ,
+  // Ethernet: SGMII to the board's Marvell 88E1111 through a GTX transceiver
   output wire          eth_rst_n   ,
-  input  wire          eth_rxck    ,
-  input  wire          eth_rxctl   ,
-  input  wire [3:0]    eth_rxd     ,
-  output wire          eth_txck    ,
-  output wire          eth_txctl   ,
-  output wire [3:0]    eth_txd     ,
-  inout  wire          eth_mdio    ,
-  output logic         eth_mdc     ,
+  input  wire          sgmii_rxp   ,
+  input  wire          sgmii_rxn   ,
+  output wire          sgmii_txp   ,
+  output wire          sgmii_txn   ,
+  input  wire          sgmii_refclk_p, // 125 MHz
+  input  wire          sgmii_refclk_n,
   output logic [ 7:0]  led         ,
   input  logic [ 7:0]  sw          ,
   output logic         fan_pwm     ,
@@ -305,6 +305,31 @@ assign cpu_reset  = ~cpu_resetn;
 `endif
 
 logic pll_locked;
+
+// Ethernet. The VC707 has legend64's SGMII Ethernet, which moves packets to and from main
+// memory itself; the other boards have (or leave out) lowRISC's RGMII Ethernet. Each kind's
+// pins exist as ports only on the boards that have them and are idle wires elsewhere.
+`ifdef VC707
+localparam bit InclLegendEthernet = (riscv::XLEN == 64);
+wire       eth_rxck, eth_rxctl, eth_txck, eth_txctl, eth_mdio;
+wire [3:0] eth_rxd, eth_txd;
+logic      eth_mdc;
+assign eth_rxck  = 1'b0;
+assign eth_rxctl = 1'b0;
+assign eth_rxd   = 4'b0;
+`else
+localparam bit InclLegendEthernet = 1'b0;
+wire       sgmii_rxp, sgmii_rxn, sgmii_refclk_p, sgmii_refclk_n, sgmii_txp, sgmii_txn;
+assign sgmii_rxp      = 1'b0;
+assign sgmii_rxn      = 1'b0;
+assign sgmii_refclk_p = 1'b0;
+assign sgmii_refclk_n = 1'b0;
+`endif
+wire        eth_link_up;
+wire        eth_dma_req, eth_dma_we, eth_dma_gnt, eth_dma_rvalid;
+wire [29:0] eth_dma_addr;
+wire [63:0] eth_dma_wdata, eth_dma_rdata;
+wire [7:0]  eth_dma_be;
 
 // ROM
 logic                    rom_req;
@@ -772,6 +797,56 @@ end
 // ---------------
 // Core
 // ---------------
+// The Ethernet MAC of the VC707 moves packets to and from main memory by itself. It does so
+// through the device port of the core's data cache, so the MAC and the core always see the
+// same memory and the driver needs no cache maintenance. The MAC's memory port holds a request
+// until it is granted, a read when the cache takes it (the data follows) and a write when it
+// is done; one request is under way at a time. Addresses are offsets into the memory.
+localparam type ypb_dev_req_t = `YPB_REQ_T(CVA6Cfg, CVA6Cfg.XLEN);
+localparam type ypb_dev_rsp_t = `YPB_RSP_T(CVA6Cfg, CVA6Cfg.XLEN);
+ypb_dev_req_t eth_dev_req;
+ypb_dev_rsp_t eth_dev_rsp;
+
+if (InclLegendEthernet) begin : gen_legend_dma
+    logic rd_wait_q, wr_wait_q;
+
+    always_comb begin
+        eth_dev_req           = '0;
+        eth_dev_req.preq      = eth_dma_req & ~rd_wait_q & ~wr_wait_q;
+        eth_dev_req.paddr     = CVA6Cfg.PLEN'(ariane_soc::DRAMBase) + CVA6Cfg.PLEN'(eth_dma_addr);
+        eth_dev_req.we        = eth_dma_we;
+        eth_dev_req.be        = eth_dma_be;
+        eth_dev_req.size      = 2'b11;
+        eth_dev_req.wdata     = eth_dma_wdata;
+        eth_dev_req.cacheable = 1'b1;
+    end
+
+    assign eth_dma_gnt    = eth_dma_we ? wr_wait_q & eth_dev_rsp.rvalid : eth_dev_rsp.pgnt;
+    assign eth_dma_rvalid = rd_wait_q & eth_dev_rsp.rvalid;
+    assign eth_dma_rdata  = eth_dev_rsp.rdata;
+
+    // reset with the core, whose cache forgets the request then
+    always_ff @(posedge clk or negedge ndmreset_n) begin
+        if (~ndmreset_n) begin
+            rd_wait_q <= 1'b0;
+            wr_wait_q <= 1'b0;
+        end else begin
+            if (eth_dev_rsp.pgnt) begin
+                rd_wait_q <= ~eth_dma_we;
+                wr_wait_q <= eth_dma_we;
+            end else if (eth_dev_rsp.rvalid) begin
+                rd_wait_q <= 1'b0;
+                wr_wait_q <= 1'b0;
+            end
+        end
+    end
+end else begin : gen_no_legend_dma
+    assign eth_dev_req    = '0;
+    assign eth_dma_gnt    = 1'b0;
+    assign eth_dma_rvalid = 1'b0;
+    assign eth_dma_rdata  = '0;
+end
+
 ariane_axi::req_t    axi_ariane_req;
 ariane_axi::resp_t   axi_ariane_resp;
 rvfi_probes_t rvfi_probes;
@@ -784,7 +859,8 @@ ariane #(
     .CVA6Cfg ( CVA6Cfg ),
     .rvfi_probes_instr_t ( rvfi_probes_instr_t ),
     .rvfi_probes_csr_t ( rvfi_probes_csr_t ),
-    .rvfi_probes_t ( rvfi_probes_t )
+    .rvfi_probes_t ( rvfi_probes_t ),
+    .DevicePortEn ( InclLegendEthernet )
 ) i_ariane (
     .clk_i        ( clk                 ),
     .rst_ni       ( ndmreset_n          ),
@@ -796,7 +872,9 @@ ariane #(
     .rvfi_probes_o( rvfi_probes         ),
     .debug_req_i  ( debug_req_irq       ),
     .noc_req_o    ( axi_ariane_req      ),
-    .noc_resp_i   ( axi_ariane_resp     )
+    .noc_resp_i   ( axi_ariane_resp     ),
+    .ypb_dev_req_i( eth_dev_req         ),
+    .ypb_dev_rsp_o( eth_dev_rsp         )
 );
 
 `AXI_ASSIGN_FROM_REQ(slave[0], axi_ariane_req)
@@ -1101,7 +1179,8 @@ ariane_peripherals #(
     .InclEthernet ( 1'b0         ) // Ethernet requires RAMB16 fpga/src/ariane-ethernet/dualmem_widen8.sv to be defined
     `elsif VC707
     .InclSPI      ( 1'b1         ),
-    .InclEthernet ( 1'b0         )
+    .InclEthernet ( 1'b0         ),
+    .InclLegendEthernet ( InclLegendEthernet )
     `elsif VCU118
     .InclSPI      ( 1'b0         ),
     .InclEthernet ( 1'b0         )
@@ -1132,6 +1211,21 @@ ariane_peripherals #(
     .eth_txd,
     .eth_mdio,
     .eth_mdc,
+    .sgmii_rxp,
+    .sgmii_rxn,
+    .sgmii_txp,
+    .sgmii_txn,
+    .sgmii_refclk_p,
+    .sgmii_refclk_n,
+    .eth_link_up_o    ( eth_link_up               ),
+    .eth_dma_req_o    ( eth_dma_req               ),
+    .eth_dma_we_o     ( eth_dma_we                ),
+    .eth_dma_addr_o   ( eth_dma_addr              ),
+    .eth_dma_wdata_o  ( eth_dma_wdata             ),
+    .eth_dma_be_o     ( eth_dma_be                ),
+    .eth_dma_gnt_i    ( eth_dma_gnt               ),
+    .eth_dma_rvalid_i ( eth_dma_rvalid            ),
+    .eth_dma_rdata_i  ( eth_dma_rdata             ),
     .phy_tx_clk_i   ( phy_tx_clk                  ),
     .sd_clk_i       ( sd_clk_sys                  ),
     .spi_clk_o      ( spi_clk_o                   ),
