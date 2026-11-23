@@ -64,6 +64,12 @@ class BoardParams:
         dram_size: usable DRAM, per register width, as a device tree value
         has_ethernet: the board carries the ethernet controller, whose node
             is dropped from the device tree when it does not
+        ethernet: which ethernet controller the board carries, "lowrisc"
+            (RGMII) or "legend" (SGMII, with DMA through the device port
+            of the data cache): the device tree names it
+        boot: where the bootloader takes the next stage from by default,
+            "sd" (the card) or "net" (TFTP through the "legend" controller,
+            see corev_apu/fpga/src/bootrom/README.md)
         bootrom_platform: platform macro the bootloader is compiled with
         hw_device: JTAG device programmed by Vivado, None when unknown
     """
@@ -80,6 +86,8 @@ class BoardParams:
         clock_hz,
         dram_size,
         has_ethernet=True,
+        ethernet="lowrisc",
+        boot="sd",
         console_kind="serial",
         bootrom_platform="PLAT_XILINX",
         hw_device=None,
@@ -94,6 +102,8 @@ class BoardParams:
         self.clock_hz = clock_hz
         self.dram_size = dram_size
         self.has_ethernet = has_ethernet
+        self.ethernet = ethernet
+        self.boot = boot
         self.console_kind = console_kind
         self.bootrom_platform = bootrom_platform
         self.hw_device = hw_device
@@ -133,6 +143,11 @@ _BOARD_PARAMS = {
         uart_baudrate=115200,
         clock_hz=50000000,
         dram_size={32: "0x08000000", 64: "0x40000000"},
+        # The PHY of this board is on SGMII: it has the ethernet controller
+        # of corev_apu/fpga/src/legend-ethernet (RV64 only), and no SD card
+        # is needed, the bootloader fetching the next stage by TFTP.
+        ethernet="legend",
+        boot="net",
     ),
     FpgaBoard.nexys_video: BoardParams(
         part="xc7a200tsbg484-1",

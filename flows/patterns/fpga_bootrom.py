@@ -23,6 +23,12 @@ steps that turn an ELF into something the RTL can instantiate:
   `corev_apu/bootrom/gen_rom.py`, which is what `ariane_xilinx.sv`
   instantiates as `bootrom_32` / `bootrom_64`.
 
+Where the bootloader takes the next stage from is fixed when it is built
+(`--boot`): the SD card, or the network for the board whose ethernet
+controller the bootloader can drive (TFTP, the kernel then mounting its
+root file system over NFS; see `corev_apu/fpga/src/bootrom/README.md`).
+The network addresses are options of this pattern and are compiled in.
+
 One ROM per register width, not per target: the FPGA top level reads
 `bootrom_<XLEN>.sv`, so the same
 binary serves every target of that width. Hence the ISA below.
@@ -39,7 +45,9 @@ bitmanip at all (openhwgroup/cva6#2121). Compression is left out for the
 same reason.
 """
 
+from enum import Enum
 from pathlib import Path
+import re
 import shutil
 import typer
 
@@ -93,13 +101,31 @@ BOOTROM_SRC = [
     "src/bouncebuf.c",
 ]
 
+# Sources of a bootloader that boots from the network: no card driver
+BOOTROM_SRC_NET = [
+    "startup.S",
+    "src/main.c",
+    "src/uart.c",
+    "src/boot_net.c",
+    "src/string.c",
+]
+
+
+class BootSource(str, Enum):
+    """Where the bootloader takes the next stage from."""
+
+    sd = "sd"
+    net = "net"
+
 
 def bootrom_out_dir(repo_dir, board, xlen):
     """Directory of the zero stage bootloader of a board and a width."""
     return repo_dir / "build" / "bootrom" / board.value / f"rv{xlen}"
 
 
-def _write_dts(dts_in, dts_out, defines, has_ethernet):
+def _write_dts(
+    dts_in, dts_out, defines, has_ethernet, ethernet="lowrisc", bootargs=None
+):
     """
     Resolve the device tree template of the board.
 
@@ -112,14 +138,28 @@ def _write_dts(dts_in, dts_out, defines, has_ethernet):
     board that has one - the reverse of what its name suggests, and the
     reason the original `sed` only passes `-e /DELETE_ETH/d` when
     `HAS_ETHERNET` is set.
+
+    The template may describe two ethernet controllers, on lines tagged
+    `LOWRISC_ETH` and `LEGEND_ETH`: the lines of the one the board does not
+    carry are dropped. The line tagged `KERNEL_BOOTARGS` is the kernel
+    command line of a bootloader that boots from the network; it is dropped
+    when there is none (`bootargs` is None).
     """
     text = dts_in.read_text(encoding="utf-8")
     # Longest names first: DRAM_SIZE_32 is a prefix-free name but
     # CLOCK_FREQUENCY is a substring of HALF_CLOCK_FREQUENCY.
     for key in sorted(defines, key=len, reverse=True):
         text = text.replace(key, str(defines[key]))
+    dropped = ["LEGEND_ETH" if ethernet != "legend" else "LOWRISC_ETH"]
     if has_ethernet:
-        text = "\n".join(line for line in text.splitlines() if "DELETE_ETH" not in line)
+        dropped.append("DELETE_ETH")
+    if bootargs is None:
+        dropped.append("KERNEL_BOOTARGS")
+    else:
+        text = text.replace("KERNEL_BOOTARGS", bootargs, 1)
+    text = "\n".join(
+        line for line in text.splitlines() if not any(tag in line for tag in dropped)
+    )
     dts_out.write_text(text.rstrip("\n") + "\n", encoding="utf-8")
 
 
@@ -145,6 +185,39 @@ def fpga_bootrom(
     ),
     xlen: int = typer.Option(
         None, help="Register width, 32 or 64 (default: from the ISA of the target)"
+    ),
+    boot: BootSource = typer.Option(
+        None,
+        help="Where the next stage comes from: the SD card or the network "
+        "(default: what the board is set up for)",
+    ),
+    board_ip: str = typer.Option(
+        "192.168.1.51", help="Network boot: address of the board"
+    ),
+    netmask: str = typer.Option(
+        "255.255.255.0", help="Network boot: netmask (kernel command line)"
+    ),
+    gateway: str = typer.Option(
+        "192.168.1.1", help="Network boot: gateway (kernel command line)"
+    ),
+    eth_mac: str = typer.Option(
+        "00:18:3e:02:e3:7f",
+        help="Ethernet address of the board, also in the device tree",
+    ),
+    tftp_server: str = typer.Option(
+        "192.168.1.176", help="Network boot: TFTP server, on the network of the board"
+    ),
+    tftp_dir: str = typer.Option(
+        "cva6", help="Network boot: directory of fw_jump.bin and Image on the server"
+    ),
+    nfs_server: str = typer.Option(
+        None, help="Network boot: NFS server (default: the TFTP server)"
+    ),
+    nfs_root: str = typer.Option(
+        "/srv/nfs/cva6", help="Network boot: exported root file system"
+    ),
+    bootargs: str = typer.Option(
+        None, help="Network boot: the whole kernel command line (default: NFS root)"
     ),
     quiet: bool = typer.Option(
         False, "--quiet", "-q", help="Suppress output (errors only)"
@@ -244,11 +317,67 @@ def fpga_bootrom(
         report.error_exit(f"Missing device tree template {dts_in}", env=True)
 
     defines = bootrom_defines(board)
+
+    # Boot source. The network needs the ethernet controller the bootloader
+    # has a driver for, which the 64-bit design of some boards carries.
+    ethernet = getattr(params, "ethernet", "lowrisc")
+    if boot is None:
+        boot = (
+            BootSource.net
+            if getattr(params, "boot", "sd") == "net" and xlen == 64
+            else BootSource.sd
+        )
+    if boot == BootSource.net and (ethernet != "legend" or xlen != 64):
+        report.error_exit(
+            f"Board '{board.value}' (RV{xlen}) cannot boot from the network: the bootloader "
+            f"only drives the ethernet controller of corev_apu/fpga/src/legend-ethernet",
+            env=True,
+        )
+    for name, value, pattern in (
+        ("--board-ip", board_ip, r"\d+(\.\d+){3}"),
+        ("--tftp-server", tftp_server, r"\d+(\.\d+){3}"),
+        ("--eth-mac", eth_mac, r"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"),
+        ("--tftp-dir", tftp_dir, r"[\w./-]+"),
+    ):
+        if not re.fullmatch(pattern, value):
+            report.error_exit(f"{name}: malformed value {value!r}", env=True)
+    defines["LOCAL_MAC_ADDRESS"] = eth_mac.replace(":", " ")
+    net_directives = []
+    if boot == BootSource.net:
+        if bootargs is None:
+            bootargs = (
+                f"console=ttyS0,{params.uart_baudrate} earlycon root=/dev/nfs "
+                f"nfsroot={nfs_server or tftp_server}:{nfs_root},vers=3,tcp,rsize=32768,wsize=32768 rw "
+                f"ip={board_ip}::{gateway}:{netmask}:cva6:eth0:off"
+            )
+        if '"' in bootargs or "\n" in bootargs:
+            report.error_exit("--bootargs: no quote nor newline allowed", env=True)
+        net_directives = [
+            "BOOT_NET",
+            f"TIMEBASE_HZ={defines['HALF_CLOCK_FREQUENCY']}",
+            f"BOARD_IP={board_ip.replace('.', ',')}",
+            f"TFTP_SERVER={tftp_server.replace('.', ',')}",
+            "ETH_MAC=" + ",".join("0x" + b for b in eth_mac.split(":")),
+            f'TFTP_DIR="{tftp_dir}"',
+        ]
+        report.add_context(
+            {
+                "board_ip": board_ip,
+                "eth_mac": eth_mac,
+                "tftp_server": tftp_server,
+                "tftp_dir": tftp_dir,
+                "bootargs": bootargs,
+            },
+            table="Network boot",
+        )
+    else:
+        bootargs = None
+    report.add_context({"boot": boot.value})
     report.add_context(defines, table="Device tree parameters")
 
     dts_file = out_dir / f"cv{xlen}a6.dts"
     dtb_file = out_dir / f"cv{xlen}a6.dtb"
-    _write_dts(dts_in, dts_file, defines, params.has_ethernet)
+    _write_dts(dts_in, dts_file, defines, params.has_ethernet, ethernet, bootargs)
     report.info(f"device tree resolved: {dts_file}")
 
     run_cmd(
@@ -278,7 +407,10 @@ def fpga_bootrom(
     sw_compile(
         target=target,
         toolchain=toolchain,
-        src_files=[str(bootrom_dir / src) for src in BOOTROM_SRC],
+        src_files=[
+            str(bootrom_dir / src)
+            for src in (BOOTROM_SRC_NET if boot == BootSource.net else BOOTROM_SRC)
+        ],
         inc_dirs=[str(out_dir), str(bootrom_dir), str(bootrom_dir / "src")],
         linker_file=str(bootrom_dir / "linker.lds"),
         options=BOOTROM_OPTIONS[xlen] + BOOTROM_COMMON_OPTIONS,
@@ -289,7 +421,8 @@ def fpga_bootrom(
             f"UART_BITRATE={defines['UART_BITRATE']}",
             f"XLEN={xlen}",
             params.bootrom_platform,
-        ],
+        ]
+        + net_directives,
         benchmark_iterations=None,
         test_name=test_name,
         pk_dir=None,
@@ -382,6 +515,7 @@ def fpga_bootrom(
             "march": march,
             "mabi": mabi,
             "rom_bytes": rom_bytes,
+            "boot": boot.value,
             **defines,
         },
         report=report,

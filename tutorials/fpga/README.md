@@ -25,6 +25,14 @@ controller, an SPI controller for the SD card, an Ethernet controller (not
 functional yet), the JTAG debug port, a boot ROM with the zero stage
 bootloader and the device tree, a UART and GPIOs on the LEDs.
 
+The VC707 design (RV64) has another Ethernet controller: a descriptor-ring
+MAC with DMA and checksum offload over SGMII, which reads and writes memory
+through the device port of the core's data cache, see
+[legend-ethernet](../../corev_apu/fpga/src/legend-ethernet/README.md). Its
+boot ROM needs no SD card: it fetches OpenSBI and the kernel by TFTP and
+the kernel mounts its root file system over NFS, see the
+[bootloader](../../corev_apu/fpga/src/bootrom/README.md).
+
 The Agilex 7 design (`cva6_altera`, Quartus Prime Pro 24.1) contains a
 DDR4 controller, the JTAG debug port, the boot ROM, a JTAG UART and GPIOs
 on the LEDs.
@@ -87,7 +95,8 @@ board).
 
 ## Booting Linux
 
-The bootloader loads Linux from the SD card. Get an image from the
+The bootloader loads Linux from the SD card (on the VC707 from the
+network instead, see above). Get an image from the
 [CVA6 SDK](https://github.com/openhwgroup/cva6-sdk) and prepare the card
 as its README explains (GPT partition for the payload). Insert the card,
 program the board, then run `fpga-linux-boot`, or connect a terminal to

@@ -6,6 +6,7 @@
 #include "spi.h"
 #include "sd.h"
 #include "gpt.h"
+#include "boot.h"
 
 #ifdef PLAT_AGILEX
 #include "bootrom_types.h"
@@ -73,12 +74,16 @@ int main()
     }
 
     int res;
+    uintptr_t dtb = (uintptr_t)_dtb;
     if(ret) {
         print_uart(" updating!\r\n");
         res = update((uint8_t *)0x80000000UL);
     } else {
         print_uart(" booting!\r\n");
-        #ifndef PLAT_AGILEX
+        #if defined(BOOT_NET)
+        dtb = boot_load(); // from the network; does not return until it has worked
+        res = 0;
+        #elif !defined(PLAT_AGILEX)
         res = gpt_find_boot_partition((uint8_t *)0x80000000UL, 2 * 16384); 
         #else 
             int start_block_fw_payload  = 0x32800; //payload at 100MB
@@ -99,11 +104,15 @@ int main()
 
     if (res == 0)
     {
-        // jump to the address
+        // jump to the address with the hart id (0) in a0 and the device tree in a1
+        #ifdef BOOT_NET
+        while (!(read_reg_u8(UART_LINE_STATUS) & 0x40)) ; // let the last characters out
+        #endif
+        register uintptr_t a0 __asm__("a0") = 0;
+        register uintptr_t a1 __asm__("a1") = dtb;
         __asm__ volatile(
             "li s0, 0x80000000;"
-            "la a1, _dtb;"
-            "jr s0");
+            "jr s0" : : "r"(a0), "r"(a1));
     }
 
     while (1)

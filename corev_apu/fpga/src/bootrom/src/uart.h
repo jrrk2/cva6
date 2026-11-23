@@ -24,6 +24,10 @@ void init_uart(uint32_t freq, uint32_t baud);
 
 int read_serial(uint8_t *res);
 
+void write_serial(char a);
+
+uint8_t read_reg_u8(uintptr_t addr);
+
 void print_uart(const char* str);
 
 void print_uart_int(uint32_t addr);

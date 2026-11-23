@@ -1492,6 +1492,8 @@ Build the zero stage bootloader of the FPGA images
 **Optional:**
 - `--board [genesys2|kc705|vc707|nexys_video]` - FPGA board (default: `genesys2`)
 - `--xlen INTEGER` - Register width, 32 or 64 (default: from the ISA of the target)
+- `--boot [sd|net]` - Where the next stage comes from (default: `net` for the 64-bit `vc707`, `sd` otherwise)
+- `--board-ip`, `--eth-mac`, `--tftp-server`, `--tftp-dir`, `--nfs-server`, `--nfs-root`, `--gateway`, `--netmask`, `--bootargs` - Network boot: the addresses compiled into the bootloader and its device tree, see `corev_apu/fpga/src/bootrom/README.md`
 
 A software pattern, like `hello-world`: it goes through `sw-compile`, so
 the bootloader is traceable to the compiler that produced it. Two steps

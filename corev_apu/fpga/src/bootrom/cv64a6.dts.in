@@ -7,6 +7,7 @@
   model = "eth,ariane-bare";
   chosen {
     stdout-path = "/soc/uart@10000000:UART_BITRATE";
+    bootargs = "KERNEL_BOOTARGS"; // a ROM that boots from the network: the root file system is on NFS
   };
   cpus {
     #address-cells = <1>;
@@ -118,14 +119,24 @@
       //   //interrupt-parent = <&PLIC0>;
       // };
     };
-    eth: lowrisc-eth@30000000 {
-      compatible = "lowrisc-eth";
-      device_type = "network";
-      interrupt-parent = <&PLIC0>;
-      interrupts = <3 0>;
-      local-mac-address = [00 18 3e 02 e3 7f]; // This needs to change if more than one GenesysII on a VLAN
-      reg = <0x0 0x30000000 0x0 0x8000>;
-    };
+    // The VC707 has legend64's descriptor-ring MAC (fpga/src/legend-ethernet): packets move by
+    // DMA, coherent with the data cache, so its node needs no memory region or dma properties.
+    // The Makefile keeps one of the two nodes.
+    eth: ethernet@30000000 { // LEGEND_ETH
+      compatible = "legend,eth"; // LEGEND_ETH
+      interrupt-parent = <&PLIC0>; // LEGEND_ETH
+      interrupts = <3>; // LEGEND_ETH
+      local-mac-address = [LOCAL_MAC_ADDRESS]; // LEGEND_ETH (ETH_MAC in the Makefile)
+      reg = <0x0 0x30000000 0x0 0x1000>; // LEGEND_ETH
+    }; // LEGEND_ETH
+    eth: lowrisc-eth@30000000 { // LOWRISC_ETH
+      compatible = "lowrisc-eth"; // LOWRISC_ETH
+      device_type = "network"; // LOWRISC_ETH
+      interrupt-parent = <&PLIC0>; // LOWRISC_ETH
+      interrupts = <3 0>; // LOWRISC_ETH
+      local-mac-address = [00 18 3e 02 e3 7f]; // This needs to change if more than one GenesysII on a VLAN // LOWRISC_ETH
+      reg = <0x0 0x30000000 0x0 0x8000>; // LOWRISC_ETH
+    }; // LOWRISC_ETH
     xlnx_gpio: gpio@40000000 {
       #gpio-cells = <2>;
       compatible = "xlnx,xps-gpio-1.00.a";
