@@ -28,6 +28,11 @@ module cva6_hpdcache_wrapper
     parameter type ypb_mmu_ptw_rsp_t = logic,
     parameter type ypb_zcmt_req_t = logic,
     parameter type ypb_zcmt_rsp_t = logic,
+    parameter type ypb_dev_req_t = logic,
+    parameter type ypb_dev_rsp_t = logic,
+    // A device outside the core has a port on the data cache (see cva6.sv)
+    parameter bit DevicePortEn = 1'b0,
+    parameter int DEV_INDEX = 0,
     parameter int HPDCACHE_NREQUESTERS,
     parameter int NUM_SNOOP_PORTS,
     parameter int MMU_PTW_INDEX,
@@ -110,6 +115,9 @@ module cva6_hpdcache_wrapper
     // ZCMT cache request/response - ID_STAGE
     input  ypb_zcmt_req_t    ypb_zcmt_req_i,
     output ypb_zcmt_rsp_t    ypb_zcmt_rsp_o,
+    // Device request/response (DevicePortEn) - SUBSYSTEM
+    input  ypb_dev_req_t     ypb_dev_req_i,
+    output ypb_dev_rsp_t     ypb_dev_rsp_o,
 
     // Write buffer status to know if empty - EX_STAGE
     output logic wbuffer_empty_o,
@@ -392,6 +400,55 @@ module cva6_hpdcache_wrapper
       .hpdcache_rsp_valid_i(dcache_rsp_valid[STORE_AMO_INDEX]),
       .hpdcache_rsp_i      (dcache_rsp[STORE_AMO_INDEX])
   );
+
+  //  Device port
+  //  {{{
+  //  A device that reads and writes main memory by itself (DMA) does it here, as one more
+  //  requester of the data cache, so that it and the core always see the same memory whatever
+  //  the write policy. Requests are physically addressed and done in one phase (preq/pgnt);
+  //  every request, a write too, is answered (rvalid).
+  if (DevicePortEn) begin : gen_dev_port
+    assign dcache_req_valid[DEV_INDEX] = ypb_dev_req_i.preq;
+    assign dcache_req[DEV_INDEX] = '{
+            addr_offset: ypb_dev_req_i.paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:0],
+            wdata: ypb_dev_req_i.wdata,
+            op: ypb_dev_req_i.we ? hpdcache_pkg::HPDCACHE_REQ_STORE : hpdcache_pkg::HPDCACHE_REQ_LOAD,
+            be: ypb_dev_req_i.be,
+            size: ypb_dev_req_i.size,
+            sid: hpdcache_req_sid_t'(DEV_INDEX),
+            tid: hpdcache_req_tid_t'(ypb_dev_req_i.aid),
+            need_rsp: 1'b1,
+            phys_indexed: 1'b1,
+            addr_tag: ypb_dev_req_i.paddr[CVA6Cfg.DCACHE_TAG_WIDTH+CVA6Cfg.DCACHE_INDEX_WIDTH-1 :
+                                          CVA6Cfg.DCACHE_INDEX_WIDTH],
+            pma: '{
+                bufferable: ypb_dev_req_i.bufferable,
+                uncacheable: !ypb_dev_req_i.cacheable,
+                io: 1'b0,
+                wr_policy_hint:
+                (CVA6Cfg.CacheWritePolicy != config_pkg::CACHE_WT_WB)
+                ? hpdcache_pkg::HPDCACHE_WR_POLICY_AUTO
+                : (ypb_dev_req_i.bufferable
+                ? hpdcache_pkg::HPDCACHE_WR_POLICY_WB
+                : hpdcache_pkg::HPDCACHE_WR_POLICY_WT)
+            }
+        };
+    assign dcache_req_abort[DEV_INDEX] = 1'b0;
+    assign dcache_req_tag[DEV_INDEX] = '0;  // unused on physically indexed request
+    assign dcache_req_pma[DEV_INDEX] = '0;  // unused on physically indexed request
+
+    always_comb begin : dev_rsp_comb
+      ypb_dev_rsp_o = '0;
+      ypb_dev_rsp_o.pgnt = ypb_dev_req_i.preq && dcache_req_ready[DEV_INDEX];
+      ypb_dev_rsp_o.rvalid = dcache_rsp_valid[DEV_INDEX];
+      ypb_dev_rsp_o.rdata = dcache_rsp[DEV_INDEX].rdata;
+      ypb_dev_rsp_o.rid = dcache_rsp[DEV_INDEX].tid;
+      ypb_dev_rsp_o.err = dcache_rsp[DEV_INDEX].error;
+    end
+  end else begin : gen_no_dev_port
+    assign ypb_dev_rsp_o = '0;
+  end
+  //  }}}
 
   //  Snoop load port
   assign snoop_valid[0] = dcache_req_valid[LOAD_INDEX] & dcache_req_ready[LOAD_INDEX],

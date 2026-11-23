@@ -186,6 +186,8 @@ module cva6_top
         .cvxif_resp_i(cvxif_resp_i),
         .noc_req_o(noc_req_o),
         .noc_resp_i(noc_resp_i),
+        .ypb_dev_req_i('0),
+        .ypb_dev_rsp_o(),
         .dcls_from_common_i(common_to_main),
         .dcls_to_common_o(common_from_main)
     );
@@ -212,6 +214,8 @@ module cva6_top
         .cvxif_resp_i(main_inputs_delayed.cvxif_resp),
         .noc_req_o(shadow_outputs.noc_req),
         .noc_resp_i(main_inputs_delayed.noc_resp),
+        .ypb_dev_req_i('0),
+        .ypb_dev_rsp_o(),
         .dcls_from_common_i(common_to_shadow),
         .dcls_to_common_o(common_from_shadow)
     );
@@ -235,6 +239,8 @@ module cva6_top
         .cvxif_resp_i(cvxif_resp_i),
         .noc_req_o(noc_req_o),
         .noc_resp_i(noc_resp_i),
+        .ypb_dev_req_i('0),
+        .ypb_dev_rsp_o(),
         .dcls_from_common_i('0),
         .dcls_to_common_o()
     );

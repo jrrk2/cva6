@@ -13,6 +13,7 @@
 // Description: Ariane Top-level module
 
 `include "cvxif_types.svh"
+`include "ypb_types.svh"
 
 module ariane import ariane_pkg::*; #(
   parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
@@ -44,7 +45,11 @@ module ariane import ariane_pkg::*; #(
   parameter type axi_aw_chan_t = ariane_axi::aw_chan_t,
   parameter type axi_w_chan_t  = ariane_axi::w_chan_t,
   parameter type noc_req_t = ariane_axi::req_t,
-  parameter type noc_resp_t = ariane_axi::resp_t
+  parameter type noc_resp_t = ariane_axi::resp_t,
+  // Device port on the data cache, for a device that does DMA (see cva6.sv)
+  parameter bit DevicePortEn = 1'b0,
+  localparam type ypb_dev_req_t = `YPB_REQ_T(CVA6Cfg, CVA6Cfg.XLEN),
+  localparam type ypb_dev_rsp_t = `YPB_RSP_T(CVA6Cfg, CVA6Cfg.XLEN)
 ) (
   input  logic                         clk_i,
   input  logic                         rst_ni,
@@ -63,7 +68,10 @@ module ariane import ariane_pkg::*; #(
   output rvfi_probes_t rvfi_probes_o,
   // memory side
   output noc_req_t                     noc_req_o,
-  input  noc_resp_t                    noc_resp_i
+  input  noc_resp_t                    noc_resp_i,
+  // device port (DevicePortEn), tie the request to '0 when not used
+  input  ypb_dev_req_t                 ypb_dev_req_i,
+  output ypb_dev_rsp_t                 ypb_dev_rsp_o
 );
 
   cvxif_req_t  cvxif_req;
@@ -78,7 +86,8 @@ module ariane import ariane_pkg::*; #(
     //.axi_aw_chan_t (axi_aw_chan_t),
     //.axi_w_chan_t (axi_w_chan_t),
     .noc_req_t (noc_req_t),
-    .noc_resp_t (noc_resp_t)
+    .noc_resp_t (noc_resp_t),
+    .DevicePortEn (DevicePortEn)
     //.readregflags_t (readregflags_t),
     //.writeregflags_t (writeregflags_t),
     //.id_t (id_t),
@@ -105,7 +114,9 @@ module ariane import ariane_pkg::*; #(
     .cvxif_req_o          ( cvxif_req                 ),
     .cvxif_resp_i         ( cvxif_resp                ),
     .noc_req_o            ( noc_req_o                 ),
-    .noc_resp_i           ( noc_resp_i                )
+    .noc_resp_i           ( noc_resp_i                ),
+    .ypb_dev_req_i        ( ypb_dev_req_i             ),
+    .ypb_dev_rsp_o        ( ypb_dev_rsp_o             )
   );
 
 

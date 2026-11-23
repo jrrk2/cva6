@@ -36,6 +36,13 @@ module cva6
     parameter type dcls_common_modules_ctrl_t = logic,
     parameter type dcls_common_modules_data_t = logic,
 
+    // Device port: a device that reads and writes main memory by itself (DMA) can do it
+    // through the data cache, as one more of its requesters, and then always sees the same
+    // memory as the core, whatever the write policy. Needs the cache subsystem.
+    parameter bit DevicePortEn = 1'b0,
+    localparam type ypb_dev_req_t = `YPB_REQ_T(CVA6Cfg, CVA6Cfg.XLEN),
+    localparam type ypb_dev_rsp_t = `YPB_RSP_T(CVA6Cfg, CVA6Cfg.XLEN),
+
     // CVXIF Types
     localparam type readregflags_t = `READREGFLAGS_T(CVA6Cfg),
     localparam type writeregflags_t = `WRITEREGFLAGS_T(CVA6Cfg),
@@ -79,6 +86,13 @@ module cva6
     output noc_req_t noc_req_o,
     // noc response, can be AXI or OpenPiton - SUBSYSTEM
     input noc_resp_t noc_resp_i,
+    // Device port request (DevicePortEn): physically addressed and done in one phase, preq
+    // with paddr, we, be, size, wdata, aid, cacheable and bufferable; the other fields are
+    // not used. Tie to '0 when not used - SUBSYSTEM
+    input ypb_dev_req_t ypb_dev_req_i,
+    // Device port response: pgnt when the request is taken, then rvalid with rdata, rid
+    // and err for every request, a write too - SUBSYSTEM
+    output ypb_dev_rsp_t ypb_dev_rsp_o,
     // DCLS
     input dcls_common_modules_data_t dcls_from_common_i,
     output dcls_common_modules_ctrl_t dcls_to_common_o
@@ -165,6 +179,9 @@ module cva6
                     CVA6Cfg.CacheWritePolicy != config_pkg::CACHE_WB || Bufferable,
                     "A write-back only data cache needs every cacheable region bufferable")
   end
+  `CVA6_CFG_CHECK(device_port_cache,
+                  !DevicePortEn || CVA6Cfg.MemSubsystem != config_pkg::MEM_OBI,
+                  "The device port (DevicePortEn) needs the cache subsystem")
   `CVA6_CFG_CHECK(nr_pmp_entries, CVA6Cfg.NrPMPEntries <= 64, "NrPMPEntries must be at most 64")
   `CVA6_CFG_CHECK(fetch_width, CVA6Cfg.FETCH_WIDTH == 32 || CVA6Cfg.FETCH_WIDTH == 64,
                   "The fetch width must be 32 or 64 bits")
@@ -361,6 +378,9 @@ module cva6
         .noc_resp_i(noc_resp_i)
     );
 
+    // No data cache, so no port on it for a device
+    assign ypb_dev_rsp_o = '0;
+
     // No data cache, so no ECC to scrub nor to report on
     assign dcache_scrub_cycle = 1'b0;
     assign dcache_dat_cor_err = 1'b0;
@@ -388,6 +408,9 @@ module cva6
         .ypb_mmu_ptw_rsp_t(ypb_mmu_ptw_rsp_t),
         .ypb_zcmt_req_t   (ypb_zcmt_req_t),
         .ypb_zcmt_rsp_t   (ypb_zcmt_rsp_t),
+        .ypb_dev_req_t    (ypb_dev_req_t),
+        .ypb_dev_rsp_t    (ypb_dev_rsp_t),
+        .DevicePortEn     (DevicePortEn),
         .noc_req_t        (noc_req_t),
         .noc_resp_t       (noc_resp_t)
     ) i_cache_subsystem (
@@ -431,6 +454,8 @@ module cva6
         .ypb_mmu_ptw_rsp_o(ypb_mmu_ptw_rsp),
         .ypb_zcmt_req_i   (ypb_zcmt_req),
         .ypb_zcmt_rsp_o   (ypb_zcmt_rsp),
+        .ypb_dev_req_i    (ypb_dev_req_i),
+        .ypb_dev_rsp_o    (ypb_dev_rsp_o),
 
         .wbuffer_empty_o (wbuffer_empty),
         .wbuffer_not_ni_o(wbuffer_not_ni),

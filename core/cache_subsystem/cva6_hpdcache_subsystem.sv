@@ -33,6 +33,10 @@ module cva6_hpdcache_subsystem
     parameter type ypb_mmu_ptw_rsp_t = logic,
     parameter type ypb_zcmt_req_t = logic,
     parameter type ypb_zcmt_rsp_t = logic,
+    parameter type ypb_dev_req_t = logic,
+    parameter type ypb_dev_rsp_t = logic,
+    // A device outside the core has a port on the data cache (see cva6.sv)
+    parameter bit DevicePortEn = 1'b0,
 
     parameter int NrHwPrefetchers = 4,
 
@@ -119,6 +123,10 @@ module cva6_hpdcache_subsystem
     input ypb_zcmt_req_t ypb_zcmt_req_i,
     // Zcmt cache response - CACHES
     output ypb_zcmt_rsp_t ypb_zcmt_rsp_o,
+    // Device cache request (DevicePortEn) - SUBSYSTEM
+    input ypb_dev_req_t ypb_dev_req_i,
+    // Device cache response (DevicePortEn) - SUBSYSTEM
+    output ypb_dev_rsp_t ypb_dev_rsp_o,
 
     // Write buffer status to know if empty - EX_STAGE
     output logic wbuffer_empty_o,
@@ -306,7 +314,9 @@ module cva6_hpdcache_subsystem
   //    .
   //    .
   //    NumPorts: Hardware Memory Prefetcher (hwpf)
-  localparam int HPDCACHE_NREQUESTERS = 3 + (CVA6Cfg.MmuPresent ? 1 : 0) + (CVA6Cfg.RVZCMT ? 1 : 0);
+  //    NumPorts + 1: Device (when DevicePortEn)
+  localparam int HPDCACHE_NREQUESTERS =
+      3 + (CVA6Cfg.MmuPresent ? 1 : 0) + (CVA6Cfg.RVZCMT ? 1 : 0) + (DevicePortEn ? 1 : 0);
   localparam int NUM_SNOOP_PORTS = 2;
 
   localparam int MMU_PTW_INDEX = 0;
@@ -314,6 +324,7 @@ module cva6_hpdcache_subsystem
   localparam int LOAD_INDEX = (CVA6Cfg.RVZCMT ? ZCMT_INDEX + 1 : ZCMT_INDEX);
   localparam int STORE_AMO_INDEX = LOAD_INDEX + 1;
   localparam int HWPF_INDEX = STORE_AMO_INDEX + 1;
+  localparam int DEV_INDEX = HWPF_INDEX + 1;
 
   function automatic hpdcache_pkg::hpdcache_user_cfg_t hpdcacheSetConfig();
     hpdcache_pkg::hpdcache_user_cfg_t userCfg = '0;
@@ -422,6 +433,10 @@ module cva6_hpdcache_subsystem
       .ypb_mmu_ptw_rsp_t(ypb_mmu_ptw_rsp_t),
       .ypb_zcmt_req_t   (ypb_zcmt_req_t),
       .ypb_zcmt_rsp_t   (ypb_zcmt_rsp_t),
+      .ypb_dev_req_t    (ypb_dev_req_t),
+      .ypb_dev_rsp_t    (ypb_dev_rsp_t),
+      .DevicePortEn     (DevicePortEn),
+      .DEV_INDEX        (DEV_INDEX),
 
       .HPDCACHE_NREQUESTERS(HPDCACHE_NREQUESTERS),
       .NUM_SNOOP_PORTS     (NUM_SNOOP_PORTS),
@@ -475,6 +490,8 @@ module cva6_hpdcache_subsystem
       .ypb_mmu_ptw_rsp_o(ypb_mmu_ptw_rsp_o),
       .ypb_zcmt_req_i(ypb_zcmt_req_i),
       .ypb_zcmt_rsp_o(ypb_zcmt_rsp_o),
+      .ypb_dev_req_i(ypb_dev_req_i),
+      .ypb_dev_rsp_o(ypb_dev_rsp_o),
       .wbuffer_empty_o(wbuffer_empty_o),
       .wbuffer_not_ni_o(wbuffer_not_ni_o),
       .hwpf_base_set_i(hwpf_base_set_i),

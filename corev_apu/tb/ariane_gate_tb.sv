@@ -122,7 +122,9 @@ module ariane_gate_tb;
         .debug_req_i          ( 1'b0                ),
         .rvfi_probes_o        ( rvfi_probes         ),
         .noc_req_o            ( axi_ariane_req      ),
-        .noc_resp_i           ( axi_ariane_resp     )
+        .noc_resp_i           ( axi_ariane_resp     ),
+        .ypb_dev_req_i        ( '0                  ),
+        .ypb_dev_rsp_o        (                     )
     );
 
     `AXI_ASSIGN_FROM_REQ(slave[0], axi_ariane_req)

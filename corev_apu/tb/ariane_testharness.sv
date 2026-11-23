@@ -657,7 +657,9 @@ module ariane_testharness #(
     .debug_req_i          ( debug_req_core      ),
 `endif
     .noc_req_o            ( axi_ariane_req      ),
-    .noc_resp_i           ( axi_ariane_resp     )
+    .noc_resp_i           ( axi_ariane_resp     ),
+    .ypb_dev_req_i        ( '0                  ),
+    .ypb_dev_rsp_o        (                     )
   );
 
   `AXI_ASSIGN_FROM_REQ(slave[0], axi_ariane_req)

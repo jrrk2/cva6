@@ -129,6 +129,15 @@ boot address, the hart id, the interrupts (`irq_i`, `ipi_i`,
 memory port (`noc_req_o`/`noc_resp_i`) and the RVFI probes (can be left
 open). The comments of the port list in `core/cva6.sv` describe each one.
 
+`cva6` also has a device port (`ypb_dev_req_i`/`ypb_dev_rsp_o`, enabled by
+its `DevicePortEn` parameter, with the cache subsystem only): a device of
+the SoC that reads and writes main memory by itself (DMA) does it there,
+as one more requester of the data cache, and so always sees the same
+memory as the core without any cache maintenance by its driver. Requests
+are physically addressed and done in one phase (`preq`/`pgnt`), and each
+one, a write too, is answered with `rvalid`. `cva6_top` does not carry the
+port through. Tie the request to `'0` when it is not used.
+
 ## The types of the ports
 
 `cva6_top` and `cva6` take the configuration and the types of their ports
