@@ -185,6 +185,8 @@ module ariane_xilinx (
   input  logic        tms         ,
   input  logic        tdi         ,
   output  wire         tdo         ,
+  // DPTI, the port the instruction trace leaves by: not on the VC707, which has no such interface
+`ifndef VC707
   input  logic        prog_clko   ,
   input  logic        prog_rxen   ,
   input  logic        prog_txen   ,
@@ -194,6 +196,7 @@ module ariane_xilinx (
   output logic        prog_oen    ,
   output logic        prog_siwun  ,
   inout  logic [7:0]  prog_d      ,
+`endif
   input  logic        rx          ,
   output logic        tx
 );
@@ -1014,6 +1017,7 @@ logic [7:0] r_data;
 logic [11:0] w_count;
 logic [11:0] r_count;
 
+`ifndef VC707
 logic prog_rxen_debug;
 logic prog_txen_debug;
 logic prog_spien_debug;
@@ -1029,10 +1033,19 @@ assign prog_rdn_debug = prog_rdn;
 assign prog_wrn_debug = prog_wrn;
 assign prog_oen_debug = prog_oen;
 assign prog_siwun_debug = prog_siwun;
+`endif
 
 //assign  w_data = {iti_to_encoder.itype[0],iti_to_encoder.itype[1],iti_to_encoder.valid} ;
 
 assign FifoEn = !usrFull && !usrEmpty;
+`ifdef VC707
+// no DPTI: the trace is dropped
+assign usrFull  = 1'b0;
+assign usrEmpty = 1'b1;
+assign w_count  = '0;
+assign r_count  = '0;
+assign r_data   = '0;
+`else
  dpti_ctrl i_dpti_ctrl (
           .wr_clk (clk),
           .wr_en  (valid_slice),
@@ -1062,6 +1075,7 @@ assign FifoEn = !usrFull && !usrEmpty;
           .prog_siwun(prog_siwun),
           .prog_d(prog_d)
 );
+`endif
 // ---------------
 // Peripherals
 // ---------------
