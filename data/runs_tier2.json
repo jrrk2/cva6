@@ -1,5 +1,26 @@
 [
   {
+    "id": 46074860170,
+    "source": "github-actions",
+    "simulator": "verilator",
+    "run_number": 5,
+    "status": "completed",
+    "conclusion": "failure",
+    "html_url": "https://github.com/jrrk2/cva6/actions/runs/46074860170",
+    "head_branch": "master",
+    "head_sha": "742dc82a",
+    "event": "schedule",
+    "created_at": "2026-11-27T22:09:23Z",
+    "updated_at": "2026-11-27T22:20:16Z",
+    "run_started_at": "2026-11-27T22:09:23Z",
+    "duration_seconds": 653,
+    "total_jobs": 0,
+    "passed_jobs": 0,
+    "failed_jobs": 0,
+    "skipped_jobs": 0,
+    "jobs": []
+  },
+  {
     "id": 45902949806,
     "source": "github-actions",
     "simulator": "verilator",
